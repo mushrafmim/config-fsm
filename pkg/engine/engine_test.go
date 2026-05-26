@@ -198,20 +198,107 @@ func TestInstance_FetchesByID(t *testing.T) {
 	}
 }
 
-func TestSignal_NoMatchingInstancesIsNoop(t *testing.T) {
+func TestSignal_InvalidInputStaysSuspendedAndRetriable(t *testing.T) {
+	rec := &testfixtures.Recorder{}
 	reg := executor.NewRegistry()
-	_ = reg.Register(testfixtures.Always{Named: "emit", Event: "success"})
-	eng := New(loadChart(t, testfixtures.LinearThreeStates), reg, store.NewMemory())
-	// No instances exist at all; Signal should return nil cleanly.
-	if err := eng.Signal(context.Background(), "anything", nil); err != nil {
-		t.Fatalf("Signal on empty store: %v", err)
+	// SuspendThenTerminate parks at "wait" on executor "park".
+	_ = reg.Register(testfixtures.Gate{Named: "park", WakeOn: []string{"signal"}, Require: "token", Recorder: rec})
+
+	st := store.NewMemory()
+	eng := New(loadChart(t, testfixtures.SuspendThenTerminate), reg, st)
+	ctx := context.Background()
+
+	if _, err := eng.Start(ctx, "i1", nil); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	// Bad signal: required field missing. Must be rejected, not fail the instance.
+	_, err := eng.SignalInstance(ctx, "i1", "signal", map[string]any{"wrong": "field"})
+	if err == nil {
+		t.Fatal("expected rejection error, got nil")
+	}
+	if !errors.Is(err, executor.ErrInvalidInput) {
+		t.Fatalf("err = %v, want wraps ErrInvalidInput", err)
+	}
+
+	// Instance must remain suspended and retriable.
+	loaded, _ := st.Load(ctx, "i1")
+	if loaded.Status != store.StatusSuspended || loaded.Current != "wait" {
+		t.Fatalf("after reject: %s/%s, want suspended/wait", loaded.Current, loaded.Status)
+	}
+	if len(loaded.WakeOn) != 1 || loaded.WakeOn[0] != "signal" {
+		t.Fatalf("WakeOn lost after reject: %v", loaded.WakeOn)
+	}
+	// The rejected data must not have been persisted.
+	if _, exists := loaded.Payload["wait"]; exists {
+		t.Fatalf("rejected data was persisted: %v", loaded.Payload)
+	}
+
+	// Corrected redelivery wakes the same instance and runs it to completion.
+	if _, err := eng.SignalInstance(ctx, "i1", "signal", map[string]any{"token": "abc"}); err != nil {
+		t.Fatalf("retry: %v", err)
+	}
+	loaded, _ = st.Load(ctx, "i1")
+	if loaded.Status != store.StatusDone || loaded.Current != "done" {
+		t.Fatalf("after good signal: %s/%s, want done/done", loaded.Current, loaded.Status)
 	}
 }
 
-func TestSignal_WakesSuspendedInstance(t *testing.T) {
-	rec := &testfixtures.Recorder{}
+// A non-validation error on resume must still fail the instance — only
+// ErrInvalidInput gets the stay-suspended treatment.
+func TestSignal_NonValidationErrorFails(t *testing.T) {
 	reg := executor.NewRegistry()
-	_ = reg.Register(testfixtures.Parker{Named: "park", WakeOn: []string{"signal"}, Recorder: rec})
+	_ = reg.Register(executor.Func{N: "park", Fn: func(ctx context.Context, e *executor.Event) (executor.Result, error) {
+		if e.Name == "" {
+			return executor.Result{Suspend: true, WakeOn: []string{"signal"}}, nil
+		}
+		return executor.Result{}, errors.New("downstream boom")
+	}})
+
+	st := store.NewMemory()
+	eng := New(loadChart(t, testfixtures.SuspendThenTerminate), reg, st)
+	ctx := context.Background()
+
+	if _, err := eng.Start(ctx, "i1", nil); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if _, err := eng.SignalInstance(ctx, "i1", "signal", nil); err == nil {
+		t.Fatal("expected error from failing resume")
+	}
+	loaded, _ := st.Load(ctx, "i1")
+	if loaded.Status != store.StatusFailed {
+		t.Fatalf("status = %s, want failed", loaded.Status)
+	}
+}
+
+func TestSignalInstance_NotFound(t *testing.T) {
+	reg := executor.NewRegistry()
+	_ = reg.Register(testfixtures.Always{Named: "emit", Event: "success"})
+	eng := New(loadChart(t, testfixtures.LinearThreeStates), reg, store.NewMemory())
+	if _, err := eng.SignalInstance(context.Background(), "ghost", "anything", nil); err != store.ErrNotFound {
+		t.Fatalf("err = %v, want ErrNotFound", err)
+	}
+}
+
+func TestSignalInstance_WrongSignalIsNotWaiting(t *testing.T) {
+	reg := executor.NewRegistry()
+	_ = reg.Register(testfixtures.Parker{Named: "park", WakeOn: []string{"signal"}})
+	eng := New(loadChart(t, testfixtures.SuspendThenTerminate), reg, store.NewMemory())
+	ctx := context.Background()
+
+	if _, err := eng.Start(ctx, "i1", nil); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	// Instance is parked on "signal" but we send "other".
+	_, err := eng.SignalInstance(ctx, "i1", "other", nil)
+	if !errors.Is(err, ErrNotWaiting) {
+		t.Fatalf("err = %v, want ErrNotWaiting", err)
+	}
+}
+
+func TestSignalInstance_WakesAndReturnsInstance(t *testing.T) {
+	reg := executor.NewRegistry()
+	_ = reg.Register(testfixtures.Parker{Named: "park", WakeOn: []string{"signal"}})
 
 	st := store.NewMemory()
 	eng := New(loadChart(t, testfixtures.SuspendThenTerminate), reg, st)
@@ -219,15 +306,13 @@ func TestSignal_WakesSuspendedInstance(t *testing.T) {
 	if _, err := eng.Start(context.Background(), "i1", nil); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	if err := eng.Signal(context.Background(), "signal", nil); err != nil {
-		t.Fatalf("Signal: %v", err)
-	}
-	loaded, err := st.Load(context.Background(), "i1")
+	// SignalInstance returns the resulting instance directly — no re-read needed.
+	returned, err := eng.SignalInstance(context.Background(), "i1", "signal", nil)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("SignalInstance: %v", err)
 	}
-	if loaded.Status != store.StatusDone || loaded.Current != "done" {
-		t.Fatalf("after Signal: %s/%s, want done/done", loaded.Current, loaded.Status)
+	if returned.Status != store.StatusDone || returned.Current != "done" {
+		t.Fatalf("returned %s/%s, want done/done", returned.Current, returned.Status)
 	}
 }
 
@@ -242,8 +327,8 @@ func TestSignal_RoutesDataToStateNamespace(t *testing.T) {
 	if _, err := eng.Start(context.Background(), "i1", map[string]any{"keep": "original"}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	if err := eng.Signal(context.Background(), "signal", map[string]any{"added": 42}); err != nil {
-		t.Fatalf("Signal: %v", err)
+	if _, err := eng.SignalInstance(context.Background(), "i1", "signal", map[string]any{"added": 42}); err != nil {
+		t.Fatalf("SignalInstance: %v", err)
 	}
 	loaded, _ := st.Load(context.Background(), "i1")
 
@@ -258,22 +343,24 @@ func TestSignal_RoutesDataToStateNamespace(t *testing.T) {
 	}
 }
 
-func TestSignal_DuplicateDeliveryIsNoop(t *testing.T) {
+func TestSignalInstance_DuplicateDeliveryIsNotWaiting(t *testing.T) {
 	rec := &testfixtures.Recorder{}
 	reg := executor.NewRegistry()
 	_ = reg.Register(testfixtures.Parker{Named: "park", WakeOn: []string{"signal"}, Recorder: rec})
 
 	eng := New(loadChart(t, testfixtures.SuspendThenTerminate), reg, store.NewMemory())
-	if _, err := eng.Start(context.Background(), "i1", nil); err != nil {
+	ctx := context.Background()
+	if _, err := eng.Start(ctx, "i1", nil); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	if err := eng.Signal(context.Background(), "signal", nil); err != nil {
+	if _, err := eng.SignalInstance(ctx, "i1", "signal", nil); err != nil {
 		t.Fatalf("first signal: %v", err)
 	}
 	callsAfterFirst := len(rec.Calls)
-	// Instance is no longer suspended — second delivery should not re-invoke the executor.
-	if err := eng.Signal(context.Background(), "signal", nil); err != nil {
-		t.Fatalf("duplicate signal: %v", err)
+	// Instance has advanced past the wait — a duplicate delivery is ErrNotWaiting
+	// and must not re-invoke the executor.
+	if _, err := eng.SignalInstance(ctx, "i1", "signal", nil); !errors.Is(err, ErrNotWaiting) {
+		t.Fatalf("duplicate signal err = %v, want ErrNotWaiting", err)
 	}
 	if len(rec.Calls) != callsAfterFirst {
 		t.Fatalf("duplicate delivery re-invoked executor: %d calls, want %d", len(rec.Calls), callsAfterFirst)
@@ -340,11 +427,11 @@ func TestCompletionHook_FiresFromSignalWithPersistedTarget(t *testing.T) {
 		t.Fatalf("hook fired before completion (%d calls)", hookCalls)
 	}
 
-	if err := eng.Signal(context.Background(), "signal", nil); err != nil {
-		t.Fatalf("Signal: %v", err)
+	if _, err := eng.SignalInstance(context.Background(), "i1", "signal", nil); err != nil {
+		t.Fatalf("SignalInstance: %v", err)
 	}
 	if hookCalls != 1 {
-		t.Fatalf("hook fired %d times after Signal, want 1", hookCalls)
+		t.Fatalf("hook fired %d times after SignalInstance, want 1", hookCalls)
 	}
 	if notifiedURL != "https://upstream/done" {
 		t.Fatalf("hook read callback_url = %v, want the persisted target", notifiedURL)
@@ -396,7 +483,7 @@ states:
 	}
 
 	// 2. User submits the form. Engine should dispatch to org and park at awaiting_review.
-	if err := eng.Signal(ctx, "form_submitted", map[string]any{"name": "alice"}); err != nil {
+	if _, err := eng.SignalInstance(ctx, "i1", "form_submitted", map[string]any{"name": "alice"}); err != nil {
 		t.Fatalf("form_submitted: %v", err)
 	}
 	loaded, _ := st.Load(ctx, "i1")
@@ -409,7 +496,7 @@ states:
 	}
 
 	// 3. Org callbacks with requires_rework: loops back to submission and parks again.
-	if err := eng.Signal(ctx, "requires_rework", map[string]any{"reason": "missing field"}); err != nil {
+	if _, err := eng.SignalInstance(ctx, "i1", "requires_rework", map[string]any{"reason": "missing field"}); err != nil {
 		t.Fatalf("requires_rework: %v", err)
 	}
 	loaded, _ = st.Load(ctx, "i1")
@@ -423,7 +510,7 @@ states:
 	}
 
 	// 4. User resubmits.
-	if err := eng.Signal(ctx, "form_submitted", nil); err != nil {
+	if _, err := eng.SignalInstance(ctx, "i1", "form_submitted", nil); err != nil {
 		t.Fatalf("resubmit: %v", err)
 	}
 	loaded, _ = st.Load(ctx, "i1")
@@ -432,7 +519,7 @@ states:
 	}
 
 	// 5. Org approves: run to terminal.
-	if err := eng.Signal(ctx, "approve", nil); err != nil {
+	if _, err := eng.SignalInstance(ctx, "i1", "approve", nil); err != nil {
 		t.Fatalf("approve: %v", err)
 	}
 	loaded, _ = st.Load(ctx, "i1")

@@ -8,10 +8,19 @@ package executor
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
 )
+
+// ErrInvalidInput is returned by an executor to reject just-arrived signal
+// input as invalid (e.g. a malformed webhook payload). When a resumed state
+// returns this on the first step of a Signal, the engine persists nothing and
+// leaves the instance suspended and retriable, rather than failing it. Wrap it
+// with fmt.Errorf("...: %w", ErrInvalidInput) to add detail; the engine
+// detects it via errors.Is.
+var ErrInvalidInput = errors.New("invalid input")
 
 // Event is the runtime input to an Executor.
 //
@@ -24,8 +33,14 @@ import (
 // Payload["submission"]["name"]) and seed/input data at the top level (e.g.
 // Payload["reference_number"]). To produce data, return Result.Output; the
 // engine files it under this state's namespace.
+//
+// Data is the raw payload delivered by the signal that woke this instance,
+// set only on the first step of a Signal-driven resume (nil otherwise). A
+// resumed executor validates Data first thing and returns ErrInvalidInput to
+// reject a bad payload.
 type Event struct {
 	Name    string
+	Data    map[string]any
 	Payload map[string]any
 	Config  map[string]any
 }

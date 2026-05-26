@@ -10,7 +10,6 @@ import (
 	"context"
 	"errors"
 	"maps"
-	"slices"
 	"sync"
 	"time"
 )
@@ -48,7 +47,6 @@ var ErrNotFound = errors.New("instance not found")
 type Store interface {
 	Save(ctx context.Context, i *Instance) error
 	Load(ctx context.Context, id string) (*Instance, error)
-	FindByWakeSignal(ctx context.Context, signal string) ([]*Instance, error)
 	FindDue(ctx context.Context, before time.Time, limit int) ([]*Instance, error)
 }
 
@@ -84,21 +82,6 @@ func (m *Memory) Load(ctx context.Context, id string) (*Instance, error) {
 		return nil, ErrNotFound
 	}
 	return cloneInstance(inst), nil
-}
-
-func (m *Memory) FindByWakeSignal(ctx context.Context, signal string) ([]*Instance, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	var out []*Instance
-	for _, inst := range m.instances {
-		if inst.Status != StatusSuspended {
-			continue
-		}
-		if slices.Contains(inst.WakeOn, signal) {
-			out = append(out, cloneInstance(inst))
-		}
-	}
-	return out, nil
 }
 
 func (m *Memory) FindDue(ctx context.Context, before time.Time, limit int) ([]*Instance, error) {

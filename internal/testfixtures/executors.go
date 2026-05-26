@@ -9,6 +9,7 @@ package testfixtures
 
 import (
 	"context"
+	"fmt"
 	"maps"
 
 	"github.com/mushrafmim/config-fsm/pkg/executor"
@@ -108,6 +109,30 @@ func (x Echo) Execute(ctx context.Context, e *executor.Event) (executor.Result, 
 		out[x.WriteKey] = e.Config["value"]
 	}
 	return executor.Result{Event: x.Event, Output: out}, nil
+}
+
+// Gate parks on a cold invocation. On resume it validates the inbound signal
+// data: if the required field is absent it rejects with executor.ErrInvalidInput
+// (leaving the instance suspended and retriable); otherwise it emits the
+// inbound signal name as the transition event.
+type Gate struct {
+	Named    string
+	WakeOn   []string
+	Require  string // field that must be present in Event.Data on resume
+	Recorder *Recorder
+}
+
+func (g Gate) Name() string { return g.Named }
+
+func (g Gate) Execute(ctx context.Context, e *executor.Event) (executor.Result, error) {
+	g.Recorder.record(g.Named, e)
+	if e.Name == "" {
+		return executor.Result{Suspend: true, WakeOn: g.WakeOn}, nil
+	}
+	if _, ok := e.Data[g.Require]; !ok {
+		return executor.Result{}, fmt.Errorf("missing required field %q: %w", g.Require, executor.ErrInvalidInput)
+	}
+	return executor.Result{Event: e.Name}, nil
 }
 
 func cloneMap(m map[string]any) map[string]any {

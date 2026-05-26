@@ -9,11 +9,18 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 
 	"github.com/mushrafmim/config-fsm/pkg/chart"
 	"github.com/mushrafmim/config-fsm/pkg/executor"
 	"github.com/mushrafmim/config-fsm/pkg/store"
 )
+
+// ErrNotWaiting is returned by SignalInstance when the target instance is not
+// currently suspended on the given signal — because it has already advanced
+// (e.g. a duplicate delivery), reached a final state, or is parked waiting on
+// a different signal. Callers can map it to an idempotent ack.
+var ErrNotWaiting = errors.New("instance not waiting on signal")
 
 // CompletionHook is invoked when an instance reaches a final state — either
 // terminal (StatusDone) or failed (StatusFailed). It runs synchronously
@@ -94,65 +101,66 @@ func (e *Engine) Instance(ctx context.Context, id string) (*store.Instance, erro
 // Step drives the instance forward until it terminates, suspends, or errors.
 // On error the instance is marked failed and persisted before returning.
 func (e *Engine) Step(ctx context.Context, inst *store.Instance) error {
-	return e.stepWith(ctx, inst, "")
+	return e.stepWith(ctx, inst, nil)
 }
 
-// Signal wakes every suspended instance waiting on the named signal and
-// drives each one synchronously through the engine until it suspends again,
-// terminates, or errors. Per-instance errors are collected via errors.Join
-// so that one bad instance does not block the others.
+// SignalInstance wakes the single suspended instance identified by id that is
+// waiting on the named signal, and drives it synchronously until it suspends
+// again, terminates, or errors. It returns the resulting instance so the
+// caller can render the new state without a separate read.
 //
-// Idempotency note: this implementation re-loads each candidate before
-// resuming and skips any that are no longer suspended (e.g. a duplicate
-// webhook delivery whose predecessor already woke the instance). True
-// conditional-update idempotency under contention arrives with the Postgres
-// store; the in-memory store is correct only because Save is mutex-guarded.
+// It returns store.ErrNotFound if no such instance exists, and ErrNotWaiting
+// if the instance is not currently suspended on this signal (already advanced,
+// in a final state, or parked on a different signal).
 //
-// Payload semantics: data is the suspended state's output and is filed under
-// that state's namespace (its name), replacing any prior value there. Empty
-// data leaves the namespace untouched, so a bare signal (e.g. "approve" with
-// no body) does not clobber data written earlier.
-func (e *Engine) Signal(ctx context.Context, signal string, data map[string]any) error {
-	candidates, err := e.store.FindByWakeSignal(ctx, signal)
+// Commit-or-discard: the wake (payload data + status change) is applied
+// in-memory only and is not persisted until the first successful step. If the
+// resumed state rejects the input with executor.ErrInvalidInput, nothing is
+// saved — the instance stays suspended with its WakeOn intact, retriable — and
+// the returned error wraps ErrInvalidInput (use errors.Is to map it to a 4xx).
+//
+// Payload: data is filed under the suspended state's namespace (its name);
+// empty data leaves the namespace untouched.
+func (e *Engine) SignalInstance(ctx context.Context, id, signal string, data map[string]any) (*store.Instance, error) {
+	inst, err := e.store.Load(ctx, id)
 	if err != nil {
-		return fmt.Errorf("find by wake signal %q: %w", signal, err)
+		return nil, err
 	}
-	var errs []error
-	for _, snapshot := range candidates {
-		inst, err := e.store.Load(ctx, snapshot.ID)
-		if err != nil {
-			errs = append(errs, fmt.Errorf("reload %s: %w", snapshot.ID, err))
-			continue
-		}
-		if inst.Status != store.StatusSuspended {
-			// Already resumed by a prior delivery — skip cleanly.
-			continue
-		}
-		if len(data) > 0 {
-			if inst.Payload == nil {
-				inst.Payload = map[string]any{}
-			}
-			inst.Payload[inst.Current] = data
-		}
-		inst.Status = store.StatusRunning
-		inst.WakeOn = nil
-		inst.WakeAt = nil
-		if err := e.store.Save(ctx, inst); err != nil {
-			errs = append(errs, fmt.Errorf("save %s before resume: %w", inst.ID, err))
-			continue
-		}
-		if err := e.stepWith(ctx, inst, signal); err != nil {
-			errs = append(errs, fmt.Errorf("resume %s on %q: %w", inst.ID, signal, err))
-		}
+	if inst.Status != store.StatusSuspended || !slices.Contains(inst.WakeOn, signal) {
+		return nil, fmt.Errorf("%w: instance %q is %s, waiting on %v", ErrNotWaiting, id, inst.Status, inst.WakeOn)
 	}
-	return errors.Join(errs...)
+	// Apply the wake in-memory only. The first successful step inside stepWith
+	// persists it; a rejection persists nothing, leaving the stored instance
+	// suspended.
+	if len(data) > 0 {
+		if inst.Payload == nil {
+			inst.Payload = map[string]any{}
+		}
+		inst.Payload[inst.Current] = data
+	}
+	inst.Status = store.StatusRunning
+	inst.WakeOn = nil
+	inst.WakeAt = nil
+	if err := e.stepWith(ctx, inst, &resumeInput{signal: signal, data: data}); err != nil {
+		return nil, fmt.Errorf("resume %q on %q: %w", id, signal, err)
+	}
+	return inst, nil
 }
 
-// stepWith is the engine loop. inboundSignal is the event name passed to the
-// FIRST executor invocation — used by Signal to surface the wake signal into
-// the resumed state. Subsequent iterations use an empty Event.Name because
-// they represent internal transitions, not external wakes.
-func (e *Engine) stepWith(ctx context.Context, inst *store.Instance, inboundSignal string) error {
+// resumeInput carries the wake signal and its data into the first step of a
+// Signal-driven resume. It is nil for a cold Step (from Start).
+type resumeInput struct {
+	signal string
+	data   map[string]any
+}
+
+// stepWith is the engine loop. On a resume (resume != nil) the first executor
+// invocation receives the wake signal name and data and may reject the input
+// with executor.ErrInvalidInput — in which case nothing is persisted and the
+// instance is left in its prior (suspended) state. Subsequent iterations are
+// internal transitions: they carry no signal and cannot reject.
+func (e *Engine) stepWith(ctx context.Context, inst *store.Instance, resume *resumeInput) error {
+	firstStep := true
 	for {
 		state, ok := e.chart.State(inst.Current)
 		if !ok {
@@ -174,14 +182,23 @@ func (e *Engine) stepWith(ctx context.Context, inst *store.Instance, inboundSign
 		}
 
 		evt := &executor.Event{
-			Name:    inboundSignal,
 			Payload: clonePayload(inst.Payload),
 			Config:  state.Config,
 		}
-		inboundSignal = "" // only the first iteration carries the wake signal
+		if firstStep && resume != nil {
+			evt.Name = resume.signal
+			evt.Data = resume.data
+		}
 
 		res, err := exec.Execute(ctx, evt)
 		if err != nil {
+			// A resumed state may reject just-arrived input. The resume path
+			// persists nothing before the first transition, so we can leave the
+			// instance untouched (still suspended) and surface the error rather
+			// than failing the whole instance.
+			if firstStep && resume != nil && errors.Is(err, executor.ErrInvalidInput) {
+				return fmt.Errorf("state %q rejected signal %q: %w", state.Name, resume.signal, err)
+			}
 			return e.fail(ctx, inst, fmt.Errorf("executor %q in state %q: %w", state.Executor, state.Name, err))
 		}
 
@@ -212,6 +229,7 @@ func (e *Engine) stepWith(ctx context.Context, inst *store.Instance, inboundSign
 		if err := e.store.Save(ctx, inst); err != nil {
 			return fmt.Errorf("save after transition to %q: %w", next, err)
 		}
+		firstStep = false
 	}
 }
 

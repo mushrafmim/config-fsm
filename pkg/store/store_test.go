@@ -38,22 +38,6 @@ func TestMemory_LoadMissing(t *testing.T) {
 	}
 }
 
-func TestMemory_FindByWakeSignal(t *testing.T) {
-	ctx := context.Background()
-	m := NewMemory()
-	m.Save(ctx, &Instance{ID: "a", Status: StatusSuspended, WakeOn: []string{"sig1", "sig2"}})
-	m.Save(ctx, &Instance{ID: "b", Status: StatusSuspended, WakeOn: []string{"sig2"}})
-	m.Save(ctx, &Instance{ID: "c", Status: StatusRunning, WakeOn: []string{"sig1"}})
-
-	got, err := m.FindByWakeSignal(ctx, "sig1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(got) != 1 || got[0].ID != "a" {
-		t.Fatalf("FindByWakeSignal(sig1) = %v", got)
-	}
-}
-
 func TestMemory_FindDue(t *testing.T) {
 	ctx := context.Background()
 	m := NewMemory()
