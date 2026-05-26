@@ -247,6 +247,77 @@ func TestSignal_DuplicateDeliveryIsNoop(t *testing.T) {
 	}
 }
 
+func TestCompletionHook_FiresOnTerminalWithOutcome(t *testing.T) {
+	var got *store.Instance
+	calls := 0
+	reg := executor.NewRegistry()
+	_ = reg.Register(testfixtures.Always{Named: "emit", Event: "success"})
+
+	eng := New(loadChart(t, testfixtures.LinearThreeStates), reg, store.NewMemory(),
+		WithCompletionHook(func(ctx context.Context, inst *store.Instance) {
+			calls++
+			got = inst
+		}))
+	if _, err := eng.Start(context.Background(), "i1", nil); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("hook fired %d times, want exactly 1", calls)
+	}
+	if got.Status != store.StatusDone || got.Current != "end" {
+		t.Fatalf("hook saw %s/%s, want done/end", got.Current, got.Status)
+	}
+}
+
+func TestCompletionHook_FiresOnFailure(t *testing.T) {
+	var got *store.Instance
+	reg := executor.NewRegistry()
+	_ = reg.Register(testfixtures.Erroring{Named: "emit", Err: errors.New("boom")})
+
+	eng := New(loadChart(t, testfixtures.LinearThreeStates), reg, store.NewMemory(),
+		WithCompletionHook(func(ctx context.Context, inst *store.Instance) { got = inst }))
+	if _, err := eng.Start(context.Background(), "i1", nil); err == nil {
+		t.Fatal("expected error from failing executor")
+	}
+	if got == nil || got.Status != store.StatusFailed {
+		t.Fatalf("hook on failure saw %+v, want status failed", got)
+	}
+}
+
+// The key durability property: the hook fires from the Signal call that
+// completes the instance — not from Start — and reads the callback target
+// that was persisted in the payload at Start time.
+func TestCompletionHook_FiresFromSignalWithPersistedTarget(t *testing.T) {
+	var notifiedURL any
+	hookCalls := 0
+	reg := executor.NewRegistry()
+	_ = reg.Register(testfixtures.Parker{Named: "park", WakeOn: []string{"signal"}})
+
+	eng := New(loadChart(t, testfixtures.SuspendThenTerminate), reg, store.NewMemory(),
+		WithCompletionHook(func(ctx context.Context, inst *store.Instance) {
+			hookCalls++
+			notifiedURL = inst.Payload["callback_url"]
+		}))
+
+	if _, err := eng.Start(context.Background(), "i1", map[string]any{"callback_url": "https://upstream/done"}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	// Still parked — must not have fired yet.
+	if hookCalls != 0 {
+		t.Fatalf("hook fired before completion (%d calls)", hookCalls)
+	}
+
+	if err := eng.Signal(context.Background(), "signal", nil); err != nil {
+		t.Fatalf("Signal: %v", err)
+	}
+	if hookCalls != 1 {
+		t.Fatalf("hook fired %d times after Signal, want 1", hookCalls)
+	}
+	if notifiedURL != "https://upstream/done" {
+		t.Fatalf("hook read callback_url = %v, want the persisted target", notifiedURL)
+	}
+}
+
 // TestSignal_FormSubmissionAndReviewFlow models the real-world flow:
 // user submits a form, data goes to an org, org callbacks with approve or
 // requires_rework — the latter loops back to the submission state.

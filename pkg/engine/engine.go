@@ -16,16 +16,49 @@ import (
 	"github.com/mushrafmim/config-fsm/pkg/store"
 )
 
+// CompletionHook is invoked when an instance reaches a final state — either
+// terminal (StatusDone) or failed (StatusFailed). It runs synchronously
+// within the Step/Signal call that drove the instance there, after the final
+// state has been persisted. Inspect inst.Status and inst.Current to determine
+// the outcome (e.g. paid vs rejected vs errored) and read routing data such
+// as a callback URL from inst.Payload.
+//
+// The hook is registered on the Engine, not per instance, so it survives
+// process restarts: every process that builds an Engine wires the same hook,
+// and it fires from whichever process completes the instance — including a
+// webhook-driven Signal call in a different process from the one that called
+// Start.
+//
+// The hook owns its own delivery reliability; it returns no error, so any
+// failure must be handled internally (log, retry, enqueue). For guaranteed
+// delivery, dispatch via the outbox (Tier 3) rather than calling upstream
+// inline.
+type CompletionHook func(ctx context.Context, inst *store.Instance)
+
+// Option configures an Engine at construction.
+type Option func(*Engine)
+
+// WithCompletionHook registers a hook fired when an instance reaches a final
+// state. Only one hook is supported; a later WithCompletionHook wins.
+func WithCompletionHook(h CompletionHook) Option {
+	return func(e *Engine) { e.onComplete = h }
+}
+
 // Engine binds a single compiled chart to an executor registry and a store.
 // Chart versioning (multiple charts in one engine) is deferred to Tier 4.
 type Engine struct {
-	chart    *chart.Chart
-	registry *executor.Registry
-	store    store.Store
+	chart      *chart.Chart
+	registry   *executor.Registry
+	store      store.Store
+	onComplete CompletionHook
 }
 
-func New(c *chart.Chart, reg *executor.Registry, s store.Store) *Engine {
-	return &Engine{chart: c, registry: reg, store: s}
+func New(c *chart.Chart, reg *executor.Registry, s store.Store, opts ...Option) *Engine {
+	e := &Engine{chart: c, registry: reg, store: s}
+	for _, opt := range opts {
+		opt(e)
+	}
+	return e
 }
 
 // Start creates a new instance pinned to this engine's chart, persists it,
@@ -118,7 +151,11 @@ func (e *Engine) stepWith(ctx context.Context, inst *store.Instance, inboundSign
 
 		if state.Terminal {
 			inst.Status = store.StatusDone
-			return e.store.Save(ctx, inst)
+			if err := e.store.Save(ctx, inst); err != nil {
+				return err
+			}
+			e.fireComplete(ctx, inst)
+			return nil
 		}
 
 		exec, ok := e.registry.Get(state.Executor)
@@ -177,5 +214,16 @@ func (e *Engine) fail(ctx context.Context, inst *store.Instance, cause error) er
 	if saveErr := e.store.Save(ctx, inst); saveErr != nil {
 		return fmt.Errorf("%w (also: persist failed status: %v)", cause, saveErr)
 	}
+	e.fireComplete(ctx, inst)
 	return cause
+}
+
+// fireComplete notifies the completion hook, if registered, that the instance
+// has reached a final state. Fired exactly once per instance: a completed
+// instance is never re-driven (FindByWakeSignal only returns suspended ones,
+// and Signal re-checks status before resuming).
+func (e *Engine) fireComplete(ctx context.Context, inst *store.Instance) {
+	if e.onComplete != nil {
+		e.onComplete(ctx, inst)
+	}
 }
