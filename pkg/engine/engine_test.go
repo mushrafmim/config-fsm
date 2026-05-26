@@ -176,6 +176,28 @@ func TestStep_MissingExecutorFails(t *testing.T) {
 	}
 }
 
+func TestInstance_FetchesByID(t *testing.T) {
+	reg := executor.NewRegistry()
+	_ = reg.Register(testfixtures.Parker{Named: "park", WakeOn: []string{"signal"}})
+	eng := New(loadChart(t, testfixtures.SuspendThenTerminate), reg, store.NewMemory())
+	ctx := context.Background()
+
+	if _, err := eng.Start(ctx, "i1", nil); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	got, err := eng.Instance(ctx, "i1")
+	if err != nil {
+		t.Fatalf("Instance: %v", err)
+	}
+	if got.Current != "wait" || got.Status != store.StatusSuspended {
+		t.Fatalf("fetched %s/%s, want wait/suspended", got.Current, got.Status)
+	}
+
+	if _, err := eng.Instance(ctx, "ghost"); err != store.ErrNotFound {
+		t.Fatalf("missing instance: err = %v, want ErrNotFound", err)
+	}
+}
+
 func TestSignal_NoMatchingInstancesIsNoop(t *testing.T) {
 	reg := executor.NewRegistry()
 	_ = reg.Register(testfixtures.Always{Named: "emit", Event: "success"})

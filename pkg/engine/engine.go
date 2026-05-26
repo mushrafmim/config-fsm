@@ -83,6 +83,14 @@ func (e *Engine) Start(ctx context.Context, id string, payload map[string]any) (
 	return inst, nil
 }
 
+// Instance fetches a single instance by ID. It returns store.ErrNotFound if
+// no instance with that ID exists. This is a read-through to the store so
+// consumers can inspect instance state (status, current state, payload)
+// without holding a reference to the store directly.
+func (e *Engine) Instance(ctx context.Context, id string) (*store.Instance, error) {
+	return e.store.Load(ctx, id)
+}
+
 // Step drives the instance forward until it terminates, suspends, or errors.
 // On error the instance is marked failed and persisted before returning.
 func (e *Engine) Step(ctx context.Context, inst *store.Instance) error {
