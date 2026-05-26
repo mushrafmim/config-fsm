@@ -76,8 +76,14 @@ states:
 	if got := rec.Calls[0].Config["value"]; got != "hello" {
 		t.Fatalf("config.value = %v", got)
 	}
-	if got := inst.Payload["greeting"]; got != "hello" {
-		t.Fatalf("payload not mutated by executor: %v", inst.Payload)
+	// Output is namespaced under the state name ("a"), not written flat.
+	ns, ok := inst.Payload["a"].(map[string]any)
+	if !ok || ns["greeting"] != "hello" {
+		t.Fatalf("output not namespaced under state: %v", inst.Payload)
+	}
+	// Seed data stays at the top level.
+	if inst.Payload["user"] != "alice" {
+		t.Fatalf("seed data lost: %v", inst.Payload)
 	}
 }
 
@@ -203,25 +209,30 @@ func TestSignal_WakesSuspendedInstance(t *testing.T) {
 	}
 }
 
-func TestSignal_MergesPayload(t *testing.T) {
+func TestSignal_RoutesDataToStateNamespace(t *testing.T) {
 	reg := executor.NewRegistry()
 	_ = reg.Register(testfixtures.Parker{Named: "park", WakeOn: []string{"signal"}})
 
 	st := store.NewMemory()
+	// SuspendThenTerminate parks at state "wait".
 	eng := New(loadChart(t, testfixtures.SuspendThenTerminate), reg, st)
 
 	if _, err := eng.Start(context.Background(), "i1", map[string]any{"keep": "original"}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	if err := eng.Signal(context.Background(), "signal", map[string]any{"added": 42, "keep": "overwritten"}); err != nil {
+	if err := eng.Signal(context.Background(), "signal", map[string]any{"added": 42}); err != nil {
 		t.Fatalf("Signal: %v", err)
 	}
 	loaded, _ := st.Load(context.Background(), "i1")
-	if loaded.Payload["added"] != 42 {
-		t.Fatalf("added missing: %v", loaded.Payload)
+
+	// Signal data lands under the suspended state's namespace ("wait").
+	ns, ok := loaded.Payload["wait"].(map[string]any)
+	if !ok || ns["added"] != 42 {
+		t.Fatalf("signal data not namespaced under state: %v", loaded.Payload)
 	}
-	if loaded.Payload["keep"] != "overwritten" {
-		t.Fatalf("shallow overwrite failed: %v", loaded.Payload)
+	// Top-level seed data is untouched — no collision.
+	if loaded.Payload["keep"] != "original" {
+		t.Fatalf("seed data clobbered: %v", loaded.Payload)
 	}
 }
 
@@ -370,8 +381,9 @@ states:
 	if loaded.Status != store.StatusSuspended || loaded.Current != "awaiting_review" {
 		t.Fatalf("after form_submitted: %s/%s, want suspended/awaiting_review", loaded.Current, loaded.Status)
 	}
-	if loaded.Payload["name"] != "alice" {
-		t.Fatalf("payload not merged: %v", loaded.Payload)
+	// Form data lands under the submission state's namespace.
+	if nsField(loaded, "submission", "name") != "alice" {
+		t.Fatalf("submission data missing: %v", loaded.Payload)
 	}
 
 	// 3. Org callbacks with requires_rework: loops back to submission and parks again.
@@ -382,8 +394,10 @@ states:
 	if loaded.Status != store.StatusSuspended || loaded.Current != "submission" {
 		t.Fatalf("after rework: %s/%s, want suspended/submission", loaded.Current, loaded.Status)
 	}
-	if loaded.Payload["reason"] != "missing field" {
-		t.Fatalf("rework reason not merged: %v", loaded.Payload)
+	// Review outcome data lands under the awaiting_review namespace — distinct
+	// from the submission namespace, so no collision with the form data.
+	if nsField(loaded, "awaiting_review", "reason") != "missing field" {
+		t.Fatalf("rework reason missing: %v", loaded.Payload)
 	}
 
 	// 4. User resubmits.
@@ -404,8 +418,18 @@ states:
 		t.Fatalf("after approve: %s/%s, want done/approved", loaded.Current, loaded.Status)
 	}
 
-	// Sanity: prior payload from earlier signals survived the journey.
-	if loaded.Payload["name"] != "alice" {
+	// Sanity: the submission namespace survived the whole journey, including
+	// the rework loop, without being clobbered by the review namespace.
+	if nsField(loaded, "submission", "name") != "alice" {
 		t.Fatalf("alice's name lost across the flow: %v", loaded.Payload)
 	}
+}
+
+// nsField reads payload[namespace][field], or nil if either level is absent.
+func nsField(inst *store.Instance, namespace, field string) any {
+	ns, ok := inst.Payload[namespace].(map[string]any)
+	if !ok {
+		return nil
+	}
+	return ns[field]
 }

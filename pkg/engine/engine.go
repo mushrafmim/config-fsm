@@ -9,7 +9,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"maps"
 
 	"github.com/mushrafmim/config-fsm/pkg/chart"
 	"github.com/mushrafmim/config-fsm/pkg/executor"
@@ -101,9 +100,10 @@ func (e *Engine) Step(ctx context.Context, inst *store.Instance) error {
 // conditional-update idempotency under contention arrives with the Postgres
 // store; the in-memory store is correct only because Save is mutex-guarded.
 //
-// Payload merge semantics: shallow overwrite. Each key in data replaces the
-// corresponding key on the instance payload. Namespace-scoped merging is
-// DESIGN.md open question #2 and deferred.
+// Payload semantics: data is the suspended state's output and is filed under
+// that state's namespace (its name), replacing any prior value there. Empty
+// data leaves the namespace untouched, so a bare signal (e.g. "approve" with
+// no body) does not clobber data written earlier.
 func (e *Engine) Signal(ctx context.Context, signal string, data map[string]any) error {
 	candidates, err := e.store.FindByWakeSignal(ctx, signal)
 	if err != nil {
@@ -120,10 +120,12 @@ func (e *Engine) Signal(ctx context.Context, signal string, data map[string]any)
 			// Already resumed by a prior delivery — skip cleanly.
 			continue
 		}
-		if inst.Payload == nil {
-			inst.Payload = map[string]any{}
+		if len(data) > 0 {
+			if inst.Payload == nil {
+				inst.Payload = map[string]any{}
+			}
+			inst.Payload[inst.Current] = data
 		}
-		maps.Copy(inst.Payload, data)
 		inst.Status = store.StatusRunning
 		inst.WakeOn = nil
 		inst.WakeAt = nil
@@ -165,7 +167,7 @@ func (e *Engine) stepWith(ctx context.Context, inst *store.Instance, inboundSign
 
 		evt := &executor.Event{
 			Name:    inboundSignal,
-			Payload: inst.Payload,
+			Payload: clonePayload(inst.Payload),
 			Config:  state.Config,
 		}
 		inboundSignal = "" // only the first iteration carries the wake signal
@@ -180,6 +182,15 @@ func (e *Engine) stepWith(ctx context.Context, inst *store.Instance, inboundSign
 			inst.WakeOn = res.WakeOn
 			inst.WakeAt = res.WakeAt
 			return e.store.Save(ctx, inst)
+		}
+
+		// File this state's output under its namespace (the state name),
+		// replacing any prior value. Empty output leaves the payload untouched.
+		if len(res.Output) > 0 {
+			if inst.Payload == nil {
+				inst.Payload = map[string]any{}
+			}
+			inst.Payload[state.Name] = res.Output
 		}
 
 		next, ok := resolveTransition(state, res.Event)
@@ -225,5 +236,35 @@ func (e *Engine) fail(ctx context.Context, inst *store.Instance, cause error) er
 func (e *Engine) fireComplete(ctx context.Context, inst *store.Instance) {
 	if e.onComplete != nil {
 		e.onComplete(ctx, inst)
+	}
+}
+
+// clonePayload returns a deep copy of the payload so executors get a
+// read-only view: any mutation they make is discarded, and writes happen only
+// through Result.Output. Nested maps and slices are copied; scalars and other
+// types are carried by value/reference.
+func clonePayload(p map[string]any) map[string]any {
+	if p == nil {
+		return map[string]any{}
+	}
+	return deepClone(p).(map[string]any)
+}
+
+func deepClone(v any) any {
+	switch t := v.(type) {
+	case map[string]any:
+		cp := make(map[string]any, len(t))
+		for k, val := range t {
+			cp[k] = deepClone(val)
+		}
+		return cp
+	case []any:
+		cp := make([]any, len(t))
+		for i, val := range t {
+			cp[i] = deepClone(val)
+		}
+		return cp
+	default:
+		return v
 	}
 }

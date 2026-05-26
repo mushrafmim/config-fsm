@@ -16,8 +16,14 @@ import (
 // Event is the runtime input to an Executor.
 //
 // Name is set when the engine resumes an instance from an external signal;
-// it is empty on the initial step. Payload is the instance's mutable state.
-// Config is the per-state config block taken from the chart.
+// it is empty on the initial step. Config is the per-state config block taken
+// from the chart.
+//
+// Payload is a read-only view of the full instance payload — a deep clone, so
+// mutations are discarded. Executors read upstream state output here (e.g.
+// Payload["submission"]["name"]) and seed/input data at the top level (e.g.
+// Payload["reference_number"]). To produce data, return Result.Output; the
+// engine files it under this state's namespace.
 type Event struct {
 	Name    string
 	Payload map[string]any
@@ -29,8 +35,15 @@ type Event struct {
 // Exactly one of {Suspend, Event} is meaningful per call:
 //   - Suspend=true: the engine parks the instance with WakeOn / WakeAt.
 //   - Suspend=false: Event names the transition the engine should take.
+//
+// Output is the executor's produced data. Executors must NOT mutate the
+// payload they receive in Event; instead they return their output here, and
+// the engine files it under the state's namespace (the state name). This
+// keeps the data journey collision-free: each state owns exactly one
+// top-level payload key.
 type Result struct {
 	Event   string
+	Output  map[string]any
 	Suspend bool
 	WakeOn  []string
 	WakeAt  *time.Time

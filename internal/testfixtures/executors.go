@@ -89,12 +89,13 @@ func (p Parker) Execute(ctx context.Context, e *executor.Event) (executor.Result
 	return executor.Result{Suspend: true, WakeOn: p.WakeOn}, nil
 }
 
-// Echo copies a configured payload key into the instance payload and emits
-// the configured event. Handy for asserting payload mutation flows.
+// Echo produces a configured key in its output (set from Config["value"]) and
+// emits the configured event. The engine files the output under this state's
+// namespace. Handy for asserting the data-journey flow.
 type Echo struct {
 	Named    string
 	Event    string
-	WriteKey string // payload key to set from Config["value"]
+	WriteKey string // output key to set from Config["value"]
 	Recorder *Recorder
 }
 
@@ -102,10 +103,11 @@ func (x Echo) Name() string { return x.Named }
 
 func (x Echo) Execute(ctx context.Context, e *executor.Event) (executor.Result, error) {
 	x.Recorder.record(x.Named, e)
+	out := map[string]any{}
 	if x.WriteKey != "" {
-		e.Payload[x.WriteKey] = e.Config["value"]
+		out[x.WriteKey] = e.Config["value"]
 	}
-	return executor.Result{Event: x.Event}, nil
+	return executor.Result{Event: x.Event, Output: out}, nil
 }
 
 func cloneMap(m map[string]any) map[string]any {
