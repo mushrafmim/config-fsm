@@ -21,14 +21,21 @@ func loadChart(t *testing.T, yaml string) *chart.Chart {
 	return c
 }
 
+// engineFor builds a chart-agnostic engine and parses the chart the test will
+// pass to Start — the engine no longer binds a chart at construction.
+func engineFor(t *testing.T, yaml string, reg *executor.Registry, st store.Store, opts ...Option) (*Engine, *chart.Chart) {
+	t.Helper()
+	return New(reg, st, opts...), loadChart(t, yaml)
+}
+
 // Tier 1 milestone: a 3-state chart runs end-to-end synchronously.
 func TestStep_ThreeStateChartRunsToTerminal(t *testing.T) {
 	rec := &testfixtures.Recorder{}
 	reg := executor.NewRegistry()
 	_ = reg.Register(testfixtures.Always{Named: "emit", Event: "success", Recorder: rec})
 
-	eng := New(loadChart(t, testfixtures.LinearThreeStates), reg, store.NewMemory())
-	inst, err := eng.Start(context.Background(), "i1", nil)
+	eng, c := engineFor(t, testfixtures.LinearThreeStates, reg, store.NewMemory())
+	inst, err := eng.Start(context.Background(), c, "i1", nil)
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -62,8 +69,8 @@ states:
 	reg := executor.NewRegistry()
 	_ = reg.Register(testfixtures.Echo{Named: "echo", Event: "ok", WriteKey: "greeting", Recorder: rec})
 
-	eng := New(loadChart(t, y), reg, store.NewMemory())
-	inst, err := eng.Start(context.Background(), "i1", map[string]any{"user": "alice"})
+	eng, c := engineFor(t, y, reg, store.NewMemory())
+	inst, err := eng.Start(context.Background(), c, "i1", map[string]any{"user": "alice"})
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -100,8 +107,8 @@ func TestStep_BranchesOnEmittedEvent(t *testing.T) {
 			reg := executor.NewRegistry()
 			_ = reg.Register(testfixtures.Always{Named: "chooser", Event: tc.emit})
 
-			eng := New(loadChart(t, testfixtures.BranchOnEvent), reg, store.NewMemory())
-			inst, err := eng.Start(context.Background(), "i1", nil)
+			eng, c := engineFor(t, testfixtures.BranchOnEvent, reg, store.NewMemory())
+			inst, err := eng.Start(context.Background(), c, "i1", nil)
 			if err != nil {
 				t.Fatalf("Start: %v", err)
 			}
@@ -116,8 +123,8 @@ func TestStep_NoMatchingTransitionFails(t *testing.T) {
 	reg := executor.NewRegistry()
 	_ = reg.Register(testfixtures.Always{Named: "chooser", Event: "neither"})
 
-	eng := New(loadChart(t, testfixtures.BranchOnEvent), reg, store.NewMemory())
-	inst, err := eng.Start(context.Background(), "i1", nil)
+	eng, c := engineFor(t, testfixtures.BranchOnEvent, reg, store.NewMemory())
+	inst, err := eng.Start(context.Background(), c, "i1", nil)
 	if err == nil || !strings.Contains(err.Error(), "no transition") {
 		t.Fatalf("err = %v", err)
 	}
@@ -131,8 +138,8 @@ func TestStep_ExecutorErrorMarksFailed(t *testing.T) {
 	reg := executor.NewRegistry()
 	_ = reg.Register(testfixtures.Erroring{Named: "emit", Err: boom})
 
-	eng := New(loadChart(t, testfixtures.LinearThreeStates), reg, store.NewMemory())
-	inst, err := eng.Start(context.Background(), "i1", nil)
+	eng, c := engineFor(t, testfixtures.LinearThreeStates, reg, store.NewMemory())
+	inst, err := eng.Start(context.Background(), c, "i1", nil)
 	if !errors.Is(err, boom) {
 		t.Fatalf("err = %v, want wraps %v", err, boom)
 	}
@@ -146,8 +153,8 @@ func TestStep_SuspendStopsAndPersistsWakeOn(t *testing.T) {
 	_ = reg.Register(testfixtures.Parker{Named: "park", WakeOn: []string{"signal"}})
 
 	st := store.NewMemory()
-	eng := New(loadChart(t, testfixtures.SuspendThenTerminate), reg, st)
-	inst, err := eng.Start(context.Background(), "i1", nil)
+	eng, c := engineFor(t, testfixtures.SuspendThenTerminate, reg, st)
+	inst, err := eng.Start(context.Background(), c, "i1", nil)
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -169,8 +176,8 @@ func TestStep_SuspendStopsAndPersistsWakeOn(t *testing.T) {
 func TestStep_MissingExecutorFails(t *testing.T) {
 	// Registry is empty: no "emit" registered, so the chart's first state
 	// cannot resolve its executor.
-	eng := New(loadChart(t, testfixtures.LinearThreeStates), executor.NewRegistry(), store.NewMemory())
-	_, err := eng.Start(context.Background(), "i1", nil)
+	eng, c := engineFor(t, testfixtures.LinearThreeStates, executor.NewRegistry(), store.NewMemory())
+	_, err := eng.Start(context.Background(), c, "i1", nil)
 	if err == nil || !strings.Contains(err.Error(), "not registered") {
 		t.Fatalf("err = %v", err)
 	}
@@ -179,10 +186,10 @@ func TestStep_MissingExecutorFails(t *testing.T) {
 func TestInstance_FetchesByID(t *testing.T) {
 	reg := executor.NewRegistry()
 	_ = reg.Register(testfixtures.Parker{Named: "park", WakeOn: []string{"signal"}})
-	eng := New(loadChart(t, testfixtures.SuspendThenTerminate), reg, store.NewMemory())
+	eng, c := engineFor(t, testfixtures.SuspendThenTerminate, reg, store.NewMemory())
 	ctx := context.Background()
 
-	if _, err := eng.Start(ctx, "i1", nil); err != nil {
+	if _, err := eng.Start(ctx, c, "i1", nil); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	got, err := eng.Instance(ctx, "i1")
@@ -205,10 +212,10 @@ func TestSignal_InvalidInputStaysSuspendedAndRetriable(t *testing.T) {
 	_ = reg.Register(testfixtures.Gate{Named: "park", WakeOn: []string{"signal"}, Require: "token", Recorder: rec})
 
 	st := store.NewMemory()
-	eng := New(loadChart(t, testfixtures.SuspendThenTerminate), reg, st)
+	eng, c := engineFor(t, testfixtures.SuspendThenTerminate, reg, st)
 	ctx := context.Background()
 
-	if _, err := eng.Start(ctx, "i1", nil); err != nil {
+	if _, err := eng.Start(ctx, c, "i1", nil); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 
@@ -256,10 +263,10 @@ func TestSignal_NonValidationErrorFails(t *testing.T) {
 	}})
 
 	st := store.NewMemory()
-	eng := New(loadChart(t, testfixtures.SuspendThenTerminate), reg, st)
+	eng, c := engineFor(t, testfixtures.SuspendThenTerminate, reg, st)
 	ctx := context.Background()
 
-	if _, err := eng.Start(ctx, "i1", nil); err != nil {
+	if _, err := eng.Start(ctx, c, "i1", nil); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	if _, err := eng.SignalInstance(ctx, "i1", "signal", nil); err == nil {
@@ -274,7 +281,7 @@ func TestSignal_NonValidationErrorFails(t *testing.T) {
 func TestSignalInstance_NotFound(t *testing.T) {
 	reg := executor.NewRegistry()
 	_ = reg.Register(testfixtures.Always{Named: "emit", Event: "success"})
-	eng := New(loadChart(t, testfixtures.LinearThreeStates), reg, store.NewMemory())
+	eng := New(reg, store.NewMemory())
 	if _, err := eng.SignalInstance(context.Background(), "ghost", "anything", nil); err != store.ErrNotFound {
 		t.Fatalf("err = %v, want ErrNotFound", err)
 	}
@@ -283,15 +290,15 @@ func TestSignalInstance_NotFound(t *testing.T) {
 func TestSignalInstance_WrongSignalIsNotWaiting(t *testing.T) {
 	reg := executor.NewRegistry()
 	_ = reg.Register(testfixtures.Parker{Named: "park", WakeOn: []string{"signal"}})
-	eng := New(loadChart(t, testfixtures.SuspendThenTerminate), reg, store.NewMemory())
+	eng, c := engineFor(t, testfixtures.SuspendThenTerminate, reg, store.NewMemory())
 	ctx := context.Background()
 
-	if _, err := eng.Start(ctx, "i1", nil); err != nil {
+	if _, err := eng.Start(ctx, c, "i1", nil); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	// Instance is parked on "signal" but we send "other".
 	_, err := eng.SignalInstance(ctx, "i1", "other", nil)
-	if !errors.Is(err, ErrNotWaiting) {
+	if !errors.Is(err, store.ErrNotWaiting) {
 		t.Fatalf("err = %v, want ErrNotWaiting", err)
 	}
 }
@@ -301,9 +308,9 @@ func TestSignalInstance_WakesAndReturnsInstance(t *testing.T) {
 	_ = reg.Register(testfixtures.Parker{Named: "park", WakeOn: []string{"signal"}})
 
 	st := store.NewMemory()
-	eng := New(loadChart(t, testfixtures.SuspendThenTerminate), reg, st)
+	eng, c := engineFor(t, testfixtures.SuspendThenTerminate, reg, st)
 
-	if _, err := eng.Start(context.Background(), "i1", nil); err != nil {
+	if _, err := eng.Start(context.Background(), c, "i1", nil); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	// SignalInstance returns the resulting instance directly — no re-read needed.
@@ -322,9 +329,9 @@ func TestSignal_RoutesDataToStateNamespace(t *testing.T) {
 
 	st := store.NewMemory()
 	// SuspendThenTerminate parks at state "wait".
-	eng := New(loadChart(t, testfixtures.SuspendThenTerminate), reg, st)
+	eng, c := engineFor(t, testfixtures.SuspendThenTerminate, reg, st)
 
-	if _, err := eng.Start(context.Background(), "i1", map[string]any{"keep": "original"}); err != nil {
+	if _, err := eng.Start(context.Background(), c, "i1", map[string]any{"keep": "original"}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	if _, err := eng.SignalInstance(context.Background(), "i1", "signal", map[string]any{"added": 42}); err != nil {
@@ -348,9 +355,9 @@ func TestSignalInstance_DuplicateDeliveryIsNotWaiting(t *testing.T) {
 	reg := executor.NewRegistry()
 	_ = reg.Register(testfixtures.Parker{Named: "park", WakeOn: []string{"signal"}, Recorder: rec})
 
-	eng := New(loadChart(t, testfixtures.SuspendThenTerminate), reg, store.NewMemory())
+	eng, c := engineFor(t, testfixtures.SuspendThenTerminate, reg, store.NewMemory())
 	ctx := context.Background()
-	if _, err := eng.Start(ctx, "i1", nil); err != nil {
+	if _, err := eng.Start(ctx, c, "i1", nil); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	if _, err := eng.SignalInstance(ctx, "i1", "signal", nil); err != nil {
@@ -359,7 +366,7 @@ func TestSignalInstance_DuplicateDeliveryIsNotWaiting(t *testing.T) {
 	callsAfterFirst := len(rec.Calls)
 	// Instance has advanced past the wait — a duplicate delivery is ErrNotWaiting
 	// and must not re-invoke the executor.
-	if _, err := eng.SignalInstance(ctx, "i1", "signal", nil); !errors.Is(err, ErrNotWaiting) {
+	if _, err := eng.SignalInstance(ctx, "i1", "signal", nil); !errors.Is(err, store.ErrNotWaiting) {
 		t.Fatalf("duplicate signal err = %v, want ErrNotWaiting", err)
 	}
 	if len(rec.Calls) != callsAfterFirst {
@@ -373,12 +380,12 @@ func TestCompletionHook_FiresOnTerminalWithOutcome(t *testing.T) {
 	reg := executor.NewRegistry()
 	_ = reg.Register(testfixtures.Always{Named: "emit", Event: "success"})
 
-	eng := New(loadChart(t, testfixtures.LinearThreeStates), reg, store.NewMemory(),
+	eng, c := engineFor(t, testfixtures.LinearThreeStates, reg, store.NewMemory(),
 		WithCompletionHook(func(ctx context.Context, inst *store.Instance) {
 			calls++
 			got = inst
 		}))
-	if _, err := eng.Start(context.Background(), "i1", nil); err != nil {
+	if _, err := eng.Start(context.Background(), c, "i1", nil); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	if calls != 1 {
@@ -394,9 +401,9 @@ func TestCompletionHook_FiresOnFailure(t *testing.T) {
 	reg := executor.NewRegistry()
 	_ = reg.Register(testfixtures.Erroring{Named: "emit", Err: errors.New("boom")})
 
-	eng := New(loadChart(t, testfixtures.LinearThreeStates), reg, store.NewMemory(),
+	eng, c := engineFor(t, testfixtures.LinearThreeStates, reg, store.NewMemory(),
 		WithCompletionHook(func(ctx context.Context, inst *store.Instance) { got = inst }))
-	if _, err := eng.Start(context.Background(), "i1", nil); err == nil {
+	if _, err := eng.Start(context.Background(), c, "i1", nil); err == nil {
 		t.Fatal("expected error from failing executor")
 	}
 	if got == nil || got.Status != store.StatusFailed {
@@ -413,13 +420,13 @@ func TestCompletionHook_FiresFromSignalWithPersistedTarget(t *testing.T) {
 	reg := executor.NewRegistry()
 	_ = reg.Register(testfixtures.Parker{Named: "park", WakeOn: []string{"signal"}})
 
-	eng := New(loadChart(t, testfixtures.SuspendThenTerminate), reg, store.NewMemory(),
+	eng, c := engineFor(t, testfixtures.SuspendThenTerminate, reg, store.NewMemory(),
 		WithCompletionHook(func(ctx context.Context, inst *store.Instance) {
 			hookCalls++
 			notifiedURL = inst.Payload["callback_url"]
 		}))
 
-	if _, err := eng.Start(context.Background(), "i1", map[string]any{"callback_url": "https://upstream/done"}); err != nil {
+	if _, err := eng.Start(context.Background(), c, "i1", map[string]any{"callback_url": "https://upstream/done"}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	// Still parked — must not have fired yet.
@@ -470,11 +477,11 @@ states:
 	_ = reg.Register(testfixtures.Parker{Named: "review", WakeOn: []string{"approve", "requires_rework"}, Recorder: rec})
 
 	st := store.NewMemory()
-	eng := New(loadChart(t, flow), reg, st)
+	eng, c := engineFor(t, flow, reg, st)
 	ctx := context.Background()
 
 	// 1. Start: parks at submission, waiting for the user to submit.
-	inst, err := eng.Start(ctx, "i1", nil)
+	inst, err := eng.Start(ctx, c, "i1", nil)
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -531,6 +538,51 @@ states:
 	// the rework loop, without being clobbered by the review namespace.
 	if nsField(loaded, "submission", "name") != "alice" {
 		t.Fatalf("alice's name lost across the flow: %v", loaded.Payload)
+	}
+}
+
+// One engine runs multiple different charts at once; each instance resumes
+// against its own pinned chart (reloaded from storage), with no chart bound to
+// the engine.
+func TestEngine_RunsMultipleChartsOnOneEngine(t *testing.T) {
+	reg := executor.NewRegistry()
+	_ = reg.Register(testfixtures.Always{Named: "emit", Event: "success"})           // for LinearThreeStates
+	_ = reg.Register(testfixtures.Parker{Named: "park", WakeOn: []string{"signal"}}) // for SuspendThenTerminate
+
+	eng := New(reg, store.NewMemory())
+	linear := loadChart(t, testfixtures.LinearThreeStates)
+	parker := loadChart(t, testfixtures.SuspendThenTerminate)
+	ctx := context.Background()
+
+	// Start two instances of two different charts on the same engine.
+	a, err := eng.Start(ctx, linear, "a", nil)
+	if err != nil {
+		t.Fatalf("start a: %v", err)
+	}
+	if a.Status != store.StatusDone {
+		t.Fatalf("a status = %s, want done", a.Status)
+	}
+
+	b, err := eng.Start(ctx, parker, "b", nil)
+	if err != nil {
+		t.Fatalf("start b: %v", err)
+	}
+	if b.Status != store.StatusSuspended {
+		t.Fatalf("b status = %s, want suspended", b.Status)
+	}
+
+	// Resume b — the engine holds no chart, so it must reload b's pinned chart
+	// from the instance itself.
+	resumed, err := eng.SignalInstance(ctx, "b", "signal", nil)
+	if err != nil {
+		t.Fatalf("signal b: %v", err)
+	}
+	if resumed.Status != store.StatusDone || resumed.Current != "done" {
+		t.Fatalf("b resumed to %s/%s, want done/done", resumed.Current, resumed.Status)
+	}
+	// Each instance recorded its own chart id.
+	if a.ChartID != "linear" || b.ChartID != "park" {
+		t.Fatalf("chart ids: a=%q b=%q, want linear/park", a.ChartID, b.ChartID)
 	}
 }
 

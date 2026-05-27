@@ -10,6 +10,7 @@ import (
 	"context"
 	"errors"
 	"maps"
+	"slices"
 	"sync"
 	"time"
 )
@@ -25,10 +26,17 @@ const (
 )
 
 // Instance is a single live execution of a chart.
+//
+// ChartDef holds the serialized chart definition the instance is pinned to,
+// captured at Start. Carrying it with the instance makes each instance
+// self-contained: resume reloads its own chart, so a redeploy never affects
+// in-flight instances and there is no separate chart registry to manage. The
+// store treats it as opaque bytes.
 type Instance struct {
 	ID            string
 	ChartID       string
 	ChartVersion  string
+	ChartDef      []byte
 	Current       string
 	BusinessState string
 	Payload       map[string]any
@@ -43,10 +51,20 @@ type Instance struct {
 // ErrNotFound is returned by Load when no instance with the given ID exists.
 var ErrNotFound = errors.New("instance not found")
 
+// ErrNotWaiting is returned by Claim when the instance exists but is not
+// currently suspended on the given signal — already advanced, in a final
+// state, or parked on a different signal.
+var ErrNotWaiting = errors.New("instance not waiting on signal")
+
 // Store is the persistence contract.
 type Store interface {
 	Save(ctx context.Context, i *Instance) error
 	Load(ctx context.Context, id string) (*Instance, error)
+	// Claim atomically transitions a suspended instance waiting on signal to
+	// running and returns it, so only one caller can drive it. It must leave
+	// WakeOn intact (the caller releases the claim back to suspended on a
+	// rejected input). It returns ErrNotFound or ErrNotWaiting otherwise.
+	Claim(ctx context.Context, id, signal string) (*Instance, error)
 	FindDue(ctx context.Context, before time.Time, limit int) ([]*Instance, error)
 }
 
@@ -84,6 +102,25 @@ func (m *Memory) Load(ctx context.Context, id string) (*Instance, error) {
 	return cloneInstance(inst), nil
 }
 
+// Claim atomically moves a suspended instance to running under the lock,
+// serializing concurrent signal deliveries. WakeOn is retained so the caller
+// can release the claim on a rejected input.
+func (m *Memory) Claim(ctx context.Context, id, signal string) (*Instance, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	inst, ok := m.instances[id]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	if inst.Status != StatusSuspended || !slices.Contains(inst.WakeOn, signal) {
+		return nil, ErrNotWaiting
+	}
+	inst.Status = StatusRunning
+	inst.Version++
+	inst.UpdatedAt = time.Now()
+	return cloneInstance(inst), nil
+}
+
 func (m *Memory) FindDue(ctx context.Context, before time.Time, limit int) ([]*Instance, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -104,6 +141,9 @@ func (m *Memory) FindDue(ctx context.Context, before time.Time, limit int) ([]*I
 
 func cloneInstance(in *Instance) *Instance {
 	cp := *in
+	if in.ChartDef != nil {
+		cp.ChartDef = append([]byte(nil), in.ChartDef...)
+	}
 	if in.Payload != nil {
 		cp.Payload = maps.Clone(in.Payload)
 	}

@@ -7,6 +7,7 @@
 package chart
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 
@@ -106,6 +107,25 @@ func Parse(data []byte) (*Chart, error) {
 	var c Chart
 	if err := yaml.Unmarshal(data, &c); err != nil {
 		return nil, fmt.Errorf("parse chart: %w", err)
+	}
+	if err := c.Validate(); err != nil {
+		return nil, err
+	}
+	return &c, nil
+}
+
+// Bytes serializes the chart to JSON for durable storage alongside an
+// instance. The lookup index is unexported and rebuilt by FromBytes.
+func (c *Chart) Bytes() ([]byte, error) {
+	return json.Marshal(c)
+}
+
+// FromBytes decodes a chart produced by Bytes and re-validates it, rebuilding
+// the lookup index.
+func FromBytes(data []byte) (*Chart, error) {
+	var c Chart
+	if err := json.Unmarshal(data, &c); err != nil {
+		return nil, fmt.Errorf("decode chart: %w", err)
 	}
 	if err := c.Validate(); err != nil {
 		return nil, err
