@@ -1,8 +1,10 @@
 package engine
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"strings"
 	"testing"
 
@@ -583,6 +585,23 @@ func TestEngine_RunsMultipleChartsOnOneEngine(t *testing.T) {
 	// Each instance recorded its own chart id.
 	if a.ChartID != "linear" || b.ChartID != "park" {
 		t.Fatalf("chart ids: a=%q b=%q, want linear/park", a.ChartID, b.ChartID)
+	}
+}
+
+func TestWithLogger_UsesProvidedLogger(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	reg := executor.NewRegistry()
+	_ = reg.Register(testfixtures.Always{Named: "emit", Event: "success"})
+	eng, c := engineFor(t, testfixtures.LinearThreeStates, reg, store.NewMemory(), WithLogger(logger))
+
+	if _, err := eng.Start(context.Background(), c, "i1", nil); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "instance started") || !strings.Contains(out, "instance completed") {
+		t.Fatalf("provided logger not used; output:\n%s", out)
 	}
 }
 

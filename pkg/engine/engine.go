@@ -9,6 +9,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 
 	"github.com/mushrafmim/config-fsm/pkg/chart"
 	"github.com/mushrafmim/config-fsm/pkg/executor"
@@ -43,6 +44,16 @@ func WithCompletionHook(h CompletionHook) Option {
 	return func(e *Engine) { e.onComplete = h }
 }
 
+// WithLogger sets the slog.Logger the engine logs lifecycle events to. If not
+// provided, the engine uses slog.Default(). A nil logger is ignored.
+func WithLogger(l *slog.Logger) Option {
+	return func(e *Engine) {
+		if l != nil {
+			e.logger = l
+		}
+	}
+}
+
 // Engine is a chart-agnostic executor: charts are supplied per Start and
 // pinned to each instance (stored with it), so one engine runs any number of
 // charts and in-flight instances are unaffected by redeploys.
@@ -50,10 +61,11 @@ type Engine struct {
 	registry   *executor.Registry
 	store      store.Store
 	onComplete CompletionHook
+	logger     *slog.Logger
 }
 
 func New(reg *executor.Registry, s store.Store, opts ...Option) *Engine {
-	e := &Engine{registry: reg, store: s}
+	e := &Engine{registry: reg, store: s, logger: slog.Default()}
 	for _, opt := range opts {
 		opt(e)
 	}
@@ -85,6 +97,7 @@ func (e *Engine) Start(ctx context.Context, c *chart.Chart, id string, payload m
 	if err := e.store.Save(ctx, inst); err != nil {
 		return nil, fmt.Errorf("save new instance: %w", err)
 	}
+	e.logger.InfoContext(ctx, "instance started", "id", id, "chart", c.ID, "version", c.Version)
 	if err := e.stepWith(ctx, c, inst, nil); err != nil {
 		return inst, err
 	}
@@ -143,12 +156,17 @@ func chartFor(inst *store.Instance) (*chart.Chart, error) {
 // Payload: data is filed under the suspended state's namespace (its name);
 // empty data leaves the namespace untouched.
 func (e *Engine) SignalInstance(ctx context.Context, id, signal string, data map[string]any) (*store.Instance, error) {
+	e.logger.DebugContext(ctx, "signal received", "id", id, "signal", signal)
 	inst, err := e.store.Claim(ctx, id, signal)
 	if err != nil {
+		// Not found, already advanced, or waiting on a different signal — a
+		// no-op. Logged so a "nothing happened" delivery is traceable.
+		e.logger.DebugContext(ctx, "signal ignored", "id", id, "signal", signal, "reason", err)
 		return nil, err
 	}
 	c, err := chartFor(inst)
 	if err != nil {
+		e.logger.ErrorContext(ctx, "failed to load instance chart", "id", id, "error", err)
 		return nil, err
 	}
 	// Apply the wake in-memory only. The first successful step inside stepWith
@@ -183,7 +201,11 @@ func (e *Engine) releaseToSuspended(ctx context.Context, id string) error {
 		return nil
 	}
 	fresh.Status = store.StatusSuspended
-	return e.store.Save(ctx, fresh)
+	if err := e.store.Save(ctx, fresh); err != nil {
+		return err
+	}
+	e.logger.DebugContext(ctx, "claim released to suspended", "id", id, "state", fresh.Current)
+	return nil
 }
 
 // resumeInput carries the wake signal and its data into the first step of a
@@ -211,6 +233,7 @@ func (e *Engine) stepWith(ctx context.Context, c *chart.Chart, inst *store.Insta
 			if err := e.store.Save(ctx, inst); err != nil {
 				return err
 			}
+			e.logger.InfoContext(ctx, "instance completed", "id", inst.ID, "chart", c.ID, "state", state.Name)
 			e.fireComplete(ctx, inst)
 			return nil
 		}
@@ -236,6 +259,7 @@ func (e *Engine) stepWith(ctx context.Context, c *chart.Chart, inst *store.Insta
 			// instance untouched (still suspended) and surface the error rather
 			// than failing the whole instance.
 			if firstStep && resume != nil && errors.Is(err, executor.ErrInvalidInput) {
+				e.logger.WarnContext(ctx, "signal input rejected", "id", inst.ID, "state", state.Name, "signal", resume.signal, "error", err)
 				return fmt.Errorf("state %q rejected signal %q: %w", state.Name, resume.signal, err)
 			}
 			return e.fail(ctx, inst, fmt.Errorf("executor %q in state %q: %w", state.Executor, state.Name, err))
@@ -245,6 +269,7 @@ func (e *Engine) stepWith(ctx context.Context, c *chart.Chart, inst *store.Insta
 			inst.Status = store.StatusSuspended
 			inst.WakeOn = res.WakeOn
 			inst.WakeAt = res.WakeAt
+			e.logger.DebugContext(ctx, "instance suspended", "id", inst.ID, "state", state.Name, "wakeOn", res.WakeOn)
 			return e.store.Save(ctx, inst)
 		}
 
@@ -262,6 +287,7 @@ func (e *Engine) stepWith(ctx context.Context, c *chart.Chart, inst *store.Insta
 			return e.fail(ctx, inst, fmt.Errorf("no transition from %q on event %q", state.Name, res.Event))
 		}
 
+		e.logger.DebugContext(ctx, "transition", "id", inst.ID, "from", state.Name, "on", res.Event, "to", next)
 		inst.Current = next
 		inst.WakeOn = nil
 		inst.WakeAt = nil
@@ -290,6 +316,7 @@ func (e *Engine) fail(ctx context.Context, inst *store.Instance, cause error) er
 	if saveErr := e.store.Save(ctx, inst); saveErr != nil {
 		return fmt.Errorf("%w (also: persist failed status: %v)", cause, saveErr)
 	}
+	e.logger.ErrorContext(ctx, "instance failed", "id", inst.ID, "state", inst.Current, "error", cause)
 	e.fireComplete(ctx, inst)
 	return cause
 }
