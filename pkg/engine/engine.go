@@ -266,10 +266,26 @@ func (e *Engine) stepWith(ctx context.Context, c *chart.Chart, inst *store.Insta
 		}
 
 		if res.Suspend {
+			// Wake signals are chart-owned: the engine reads them from the state,
+			// not from the executor. A state that suspends with neither a declared
+			// signal nor a WakeAt deadline could never be woken — fail it loudly
+			// rather than park it forever.
+			if len(state.Signals) == 0 && res.WakeAt == nil {
+				return e.fail(ctx, inst, fmt.Errorf("state %q suspended but declares no signals and set no WakeAt — instance would be unwakeable", state.Name))
+			}
+			// A suspending executor may still produce output (e.g. the handle of
+			// the external task it is now waiting on). File it under the state's
+			// namespace, exactly as the transition path does, before parking.
+			if len(res.Output) > 0 {
+				if inst.Payload == nil {
+					inst.Payload = map[string]any{}
+				}
+				inst.Payload[state.Name] = res.Output
+			}
 			inst.Status = store.StatusSuspended
-			inst.WakeOn = res.WakeOn
+			inst.WakeOn = state.Signals
 			inst.WakeAt = res.WakeAt
-			e.logger.DebugContext(ctx, "instance suspended", "id", inst.ID, "state", state.Name, "wakeOn", res.WakeOn)
+			e.logger.DebugContext(ctx, "instance suspended", "id", inst.ID, "state", state.Name, "wakeOn", state.Signals)
 			return e.store.Save(ctx, inst)
 		}
 

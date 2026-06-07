@@ -152,7 +152,7 @@ func TestStep_ExecutorErrorMarksFailed(t *testing.T) {
 
 func TestStep_SuspendStopsAndPersistsWakeOn(t *testing.T) {
 	reg := executor.NewRegistry()
-	_ = reg.Register(testfixtures.Parker{Named: "park", WakeOn: []string{"signal"}})
+	_ = reg.Register(testfixtures.Parker{Named: "park"})
 
 	st := store.NewMemory()
 	eng, c := engineFor(t, testfixtures.SuspendThenTerminate, reg, st)
@@ -175,6 +175,53 @@ func TestStep_SuspendStopsAndPersistsWakeOn(t *testing.T) {
 	}
 }
 
+// An executor that suspends in a state with no chart-declared signals (and no
+// WakeAt) would park forever — the engine must fail it instead.
+func TestStep_SuspendWithoutSignalsIsUnwakeable(t *testing.T) {
+	reg := executor.NewRegistry()
+	// "chooser" is the executor for BranchOnEvent's "choose" state, which
+	// declares no signals. Make it suspend instead of branching.
+	_ = reg.Register(executor.Func{N: "chooser", Fn: func(ctx context.Context, e *executor.Event) (executor.Result, error) {
+		return executor.Result{Suspend: true}, nil
+	}})
+
+	st := store.NewMemory()
+	eng, c := engineFor(t, testfixtures.BranchOnEvent, reg, st)
+	inst, err := eng.Start(context.Background(), c, "i1", nil)
+	if err == nil || !strings.Contains(err.Error(), "unwakeable") {
+		t.Fatalf("err = %v, want unwakeable", err)
+	}
+	if inst.Status != store.StatusFailed {
+		t.Fatalf("status = %s, want failed", inst.Status)
+	}
+}
+
+// A suspending executor that returns Output (e.g. the handle of the external
+// task it now waits on) must have that output filed under the state namespace
+// before the instance parks.
+func TestStep_SuspendFilesOutputUnderNamespace(t *testing.T) {
+	reg := executor.NewRegistry()
+	_ = reg.Register(executor.Func{N: "park", Fn: func(ctx context.Context, e *executor.Event) (executor.Result, error) {
+		if e.Name == "" {
+			return executor.Result{Suspend: true, Output: map[string]any{"task_id": "T-9"}}, nil
+		}
+		return executor.Result{Event: e.Name}, nil
+	}})
+
+	st := store.NewMemory()
+	eng, c := engineFor(t, testfixtures.SuspendThenTerminate, reg, st)
+	if _, err := eng.Start(context.Background(), c, "i1", nil); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	loaded, _ := st.Load(context.Background(), "i1")
+	if loaded.Status != store.StatusSuspended {
+		t.Fatalf("status = %s, want suspended", loaded.Status)
+	}
+	if nsField(loaded, "wait", "task_id") != "T-9" {
+		t.Fatalf("suspend output not filed under namespace: %v", loaded.Payload)
+	}
+}
+
 func TestStep_MissingExecutorFails(t *testing.T) {
 	// Registry is empty: no "emit" registered, so the chart's first state
 	// cannot resolve its executor.
@@ -187,7 +234,7 @@ func TestStep_MissingExecutorFails(t *testing.T) {
 
 func TestInstance_FetchesByID(t *testing.T) {
 	reg := executor.NewRegistry()
-	_ = reg.Register(testfixtures.Parker{Named: "park", WakeOn: []string{"signal"}})
+	_ = reg.Register(testfixtures.Parker{Named: "park"})
 	eng, c := engineFor(t, testfixtures.SuspendThenTerminate, reg, store.NewMemory())
 	ctx := context.Background()
 
@@ -211,7 +258,7 @@ func TestSignal_InvalidInputStaysSuspendedAndRetriable(t *testing.T) {
 	rec := &testfixtures.Recorder{}
 	reg := executor.NewRegistry()
 	// SuspendThenTerminate parks at "wait" on executor "park".
-	_ = reg.Register(testfixtures.Gate{Named: "park", WakeOn: []string{"signal"}, Require: "token", Recorder: rec})
+	_ = reg.Register(testfixtures.Gate{Named: "park", Require: "token", Recorder: rec})
 
 	st := store.NewMemory()
 	eng, c := engineFor(t, testfixtures.SuspendThenTerminate, reg, st)
@@ -259,7 +306,7 @@ func TestSignal_NonValidationErrorFails(t *testing.T) {
 	reg := executor.NewRegistry()
 	_ = reg.Register(executor.Func{N: "park", Fn: func(ctx context.Context, e *executor.Event) (executor.Result, error) {
 		if e.Name == "" {
-			return executor.Result{Suspend: true, WakeOn: []string{"signal"}}, nil
+			return executor.Result{Suspend: true}, nil
 		}
 		return executor.Result{}, errors.New("downstream boom")
 	}})
@@ -291,7 +338,7 @@ func TestSignalInstance_NotFound(t *testing.T) {
 
 func TestSignalInstance_WrongSignalIsNotWaiting(t *testing.T) {
 	reg := executor.NewRegistry()
-	_ = reg.Register(testfixtures.Parker{Named: "park", WakeOn: []string{"signal"}})
+	_ = reg.Register(testfixtures.Parker{Named: "park"})
 	eng, c := engineFor(t, testfixtures.SuspendThenTerminate, reg, store.NewMemory())
 	ctx := context.Background()
 
@@ -307,7 +354,7 @@ func TestSignalInstance_WrongSignalIsNotWaiting(t *testing.T) {
 
 func TestSignalInstance_WakesAndReturnsInstance(t *testing.T) {
 	reg := executor.NewRegistry()
-	_ = reg.Register(testfixtures.Parker{Named: "park", WakeOn: []string{"signal"}})
+	_ = reg.Register(testfixtures.Parker{Named: "park"})
 
 	st := store.NewMemory()
 	eng, c := engineFor(t, testfixtures.SuspendThenTerminate, reg, st)
@@ -327,7 +374,7 @@ func TestSignalInstance_WakesAndReturnsInstance(t *testing.T) {
 
 func TestSignal_RoutesDataToStateNamespace(t *testing.T) {
 	reg := executor.NewRegistry()
-	_ = reg.Register(testfixtures.Parker{Named: "park", WakeOn: []string{"signal"}})
+	_ = reg.Register(testfixtures.Parker{Named: "park"})
 
 	st := store.NewMemory()
 	// SuspendThenTerminate parks at state "wait".
@@ -355,7 +402,7 @@ func TestSignal_RoutesDataToStateNamespace(t *testing.T) {
 func TestSignalInstance_DuplicateDeliveryIsNotWaiting(t *testing.T) {
 	rec := &testfixtures.Recorder{}
 	reg := executor.NewRegistry()
-	_ = reg.Register(testfixtures.Parker{Named: "park", WakeOn: []string{"signal"}, Recorder: rec})
+	_ = reg.Register(testfixtures.Parker{Named: "park", Recorder: rec})
 
 	eng, c := engineFor(t, testfixtures.SuspendThenTerminate, reg, store.NewMemory())
 	ctx := context.Background()
@@ -420,7 +467,7 @@ func TestCompletionHook_FiresFromSignalWithPersistedTarget(t *testing.T) {
 	var notifiedURL any
 	hookCalls := 0
 	reg := executor.NewRegistry()
-	_ = reg.Register(testfixtures.Parker{Named: "park", WakeOn: []string{"signal"}})
+	_ = reg.Register(testfixtures.Parker{Named: "park"})
 
 	eng, c := engineFor(t, testfixtures.SuspendThenTerminate, reg, store.NewMemory(),
 		WithCompletionHook(func(ctx context.Context, inst *store.Instance) {
@@ -458,6 +505,8 @@ initial: submission
 states:
   - name: submission
     executor: form
+    signals:
+      - form_submitted
     transitions:
       - { on: form_submitted, to: dispatch }
   - name: dispatch
@@ -466,6 +515,9 @@ states:
       - { on: dispatched, to: awaiting_review }
   - name: awaiting_review
     executor: review
+    signals:
+      - approve
+      - requires_rework
     transitions:
       - { on: approve,         to: approved }
       - { on: requires_rework, to: submission }
@@ -474,9 +526,9 @@ states:
 `
 	rec := &testfixtures.Recorder{}
 	reg := executor.NewRegistry()
-	_ = reg.Register(testfixtures.Parker{Named: "form", WakeOn: []string{"form_submitted"}, Recorder: rec})
+	_ = reg.Register(testfixtures.Parker{Named: "form", Recorder: rec})
 	_ = reg.Register(testfixtures.Always{Named: "org_api", Event: "dispatched", Recorder: rec})
-	_ = reg.Register(testfixtures.Parker{Named: "review", WakeOn: []string{"approve", "requires_rework"}, Recorder: rec})
+	_ = reg.Register(testfixtures.Parker{Named: "review", Recorder: rec})
 
 	st := store.NewMemory()
 	eng, c := engineFor(t, flow, reg, st)
@@ -549,7 +601,7 @@ states:
 func TestEngine_RunsMultipleChartsOnOneEngine(t *testing.T) {
 	reg := executor.NewRegistry()
 	_ = reg.Register(testfixtures.Always{Named: "emit", Event: "success"})           // for LinearThreeStates
-	_ = reg.Register(testfixtures.Parker{Named: "park", WakeOn: []string{"signal"}}) // for SuspendThenTerminate
+	_ = reg.Register(testfixtures.Parker{Named: "park"}) // for SuspendThenTerminate
 
 	eng := New(reg, store.NewMemory())
 	linear := loadChart(t, testfixtures.LinearThreeStates)

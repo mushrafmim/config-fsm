@@ -48,7 +48,10 @@ type Event struct {
 // Result is the runtime output of an Executor.
 //
 // Exactly one of {Suspend, Event} is meaningful per call:
-//   - Suspend=true: the engine parks the instance with WakeOn / WakeAt.
+//   - Suspend=true: the engine parks the instance. The set of signals that may
+//     wake it is chart-owned (the state's Signals field), not returned here;
+//     the executor only decides *whether* to suspend, plus an optional WakeAt
+//     deadline.
 //   - Suspend=false: Event names the transition the engine should take.
 //
 // Output is the executor's produced data. Executors must NOT mutate the
@@ -60,7 +63,6 @@ type Result struct {
 	Event   string
 	Output  map[string]any
 	Suspend bool
-	WakeOn  []string
 	WakeAt  *time.Time
 }
 

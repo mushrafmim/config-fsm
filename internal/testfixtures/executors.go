@@ -70,13 +70,12 @@ func (x Erroring) Execute(ctx context.Context, e *executor.Event) (executor.Resu
 
 // Parker is a signal-routing executor.
 //
-// On a cold invocation (Event.Name == ""), it suspends with the configured
-// WakeOn signals. On resume (Event.Name carries the signal that woke the
-// instance), it emits that signal name as the transition event — letting the
-// engine route to whichever transition matches.
+// On a cold invocation (Event.Name == ""), it suspends; the engine reads the
+// wake signals from the chart state. On resume (Event.Name carries the signal
+// that woke the instance), it emits that signal name as the transition event —
+// letting the engine route to whichever transition matches.
 type Parker struct {
 	Named    string
-	WakeOn   []string
 	Recorder *Recorder
 }
 
@@ -87,7 +86,7 @@ func (p Parker) Execute(ctx context.Context, e *executor.Event) (executor.Result
 	if e.Name != "" {
 		return executor.Result{Event: e.Name}, nil
 	}
-	return executor.Result{Suspend: true, WakeOn: p.WakeOn}, nil
+	return executor.Result{Suspend: true}, nil
 }
 
 // Echo produces a configured key in its output (set from Config["value"]) and
@@ -117,7 +116,6 @@ func (x Echo) Execute(ctx context.Context, e *executor.Event) (executor.Result, 
 // inbound signal name as the transition event.
 type Gate struct {
 	Named    string
-	WakeOn   []string
 	Require  string // field that must be present in Event.Data on resume
 	Recorder *Recorder
 }
@@ -127,7 +125,7 @@ func (g Gate) Name() string { return g.Named }
 func (g Gate) Execute(ctx context.Context, e *executor.Event) (executor.Result, error) {
 	g.Recorder.record(g.Named, e)
 	if e.Name == "" {
-		return executor.Result{Suspend: true, WakeOn: g.WakeOn}, nil
+		return executor.Result{Suspend: true}, nil
 	}
 	if _, ok := e.Data[g.Require]; !ok {
 		return executor.Result{}, fmt.Errorf("missing required field %q: %w", g.Require, executor.ErrInvalidInput)

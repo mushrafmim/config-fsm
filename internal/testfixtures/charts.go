@@ -32,6 +32,8 @@ initial: wait
 states:
   - name: wait
     executor: park
+    signals:
+      - signal
     transitions:
       - { on: signal, to: done }
   - name: done
