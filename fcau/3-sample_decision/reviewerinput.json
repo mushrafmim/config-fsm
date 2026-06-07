@@ -1,0 +1,10 @@
+{
+  "id": "fcau-sample-decision--officer-review",
+  "task_type": "EXTERNAL_REVIEW",
+  "output_namespace": "reviewerform",
+  "plugin_properties": {
+    "service_id": "fcau",
+    "path": "/api/oga/inject",
+    "task_code": "fcau_sample_decision_v1"
+  }
+}

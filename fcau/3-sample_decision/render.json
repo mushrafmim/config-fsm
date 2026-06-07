@@ -1,0 +1,21 @@
+{
+  "id": "fcau-sample-decision-flow:render",
+  "type": "REVIEW",
+  "sections": {
+    "status_message": {
+      "id": "status_message",
+      "templateId": "fcau-sample-decision--reviewer-instructions",
+      "title": "Assessment Status",
+      "projector": "MARKDOWN",
+      "visibleWhen": { "states": ["QUEUED_EXTERNALLY"] }
+    },
+    "reviewerform": {
+      "id": "reviewerform",
+      "templateId": "fcau-sample-decision--reviewer-form",
+      "title": "Sample Requirement Decision",
+      "projector": "FORM",
+      "dataKey": "reviewerform",
+      "visibleWhen": { "requireDataKey": "reviewerform" }
+    }
+  }
+}

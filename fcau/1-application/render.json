@@ -1,0 +1,33 @@
+{
+  "id": "fcau-apply-health-cert-flow:render",
+  "type": "APPLICATION",
+  "sections": {
+    "workspace": {
+      "id": "workspace",
+      "templateId": "fcau-apply-health-cert--user-form",
+      "title": "Health Certificate Application",
+      "projector": "FORM",
+      "dataKey": "userform"
+    },
+    "reference": {
+      "id": "reference",
+      "templateId": "fcau-apply-health-cert--reviewer-form",
+      "title": "Application Assessment Review",
+      "projector": "FORM",
+      "dataKey": "reviewerform",
+      "visibleWhen": { "requireDataKey": "reviewerform" }
+    }
+  },
+  "states": {
+    "PENDING_USER": {
+      "actions": [
+        {
+          "kind": "submit_form",
+          "label": "Submit application",
+          "command": "submit",
+          "variant": "primary"
+        }
+      ]
+    }
+  }
+}

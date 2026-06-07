@@ -1,0 +1,40 @@
+{
+  "id": "fcau-sample-decision-flow",
+  "name": "Decide Sample Requirement",
+  "version": 1,
+  "nodes": [
+    {
+      "id": "start",
+      "type": "START"
+    },
+    {
+      "id": "sample_decision_task",
+      "type": "TASK",
+      "task_template_id": "fcau-sample-decision--officer-review",
+      "input_mapping": {
+        "userform": "submission",
+        "reference_number": "submission.reference_number"
+      },
+      "output_mapping": {
+        "sample_required": "reviewerform.sample_required",
+        "reviewer_comments?": "reviewerform.reviewer_comments"
+      }
+    },
+    {
+      "id": "end",
+      "type": "END"
+    }
+  ],
+  "edges": [
+    {
+      "id": "e1",
+      "source_id": "start",
+      "target_id": "sample_decision_task"
+    },
+    {
+      "id": "e2",
+      "source_id": "sample_decision_task",
+      "target_id": "end"
+    }
+  ]
+}

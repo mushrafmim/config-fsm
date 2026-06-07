@@ -1,0 +1,53 @@
+{
+  "id": "fcau-pay-lab-fee-flow:render",
+  "type": "PAYMENT",
+  "sections": {
+    "workspace": {
+      "id": "workspace",
+      "templateId": "fcau-pay-lab-fee--select-method-form",
+      "title": "Select Payment Gateway",
+      "projector": "FORM",
+      "dataKey": "payment_method",
+      "visibleWhen": { "states": ["PENDING_USER"] }
+    },
+    "payment_instructions": {
+      "id": "instructions",
+      "templateId": "fcau-pay-lab-fee--instructions-wrapper",
+      "title": "Payment Instructions",
+      "projector": "PAYMENT",
+      "dataKey": "payment",
+      "visibleWhen": { "states": ["PENDING_PAYMENT"] }
+    },
+    "payment_details": {
+      "id": "payment_details",
+      "templateId": "fcau-pay-lab-fee--payment-form",
+      "title": "Laboratory Test Fee Details",
+      "projector": "FORM",
+      "dataKey": "payment",
+      "visibleWhen": { "states": ["PENDING_PAYMENT"] }
+    },
+    "payment_success": {
+      "id": "payment_success",
+      "templateId": "fcau-pay-lab-fee--success-message",
+      "title": "Payment Successful",
+      "projector": "MARKDOWN",
+      "dataKey": "payment",
+      "visibleWhen": { "states": ["COMPLETED"] }
+    }
+  },
+  "states": {
+    "PENDING_USER": {
+      "actions": [
+        {
+          "kind": "submit_form",
+          "label": "Proceed to Payment",
+          "command": "submit",
+          "variant": "primary"
+        }
+      ]
+    },
+    "PENDING_PAYMENT": {
+      "actions": []
+    }
+  }
+}

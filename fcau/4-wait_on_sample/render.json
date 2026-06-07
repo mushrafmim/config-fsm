@@ -1,0 +1,21 @@
+{
+  "id": "fcau-wait-sample-flow:render",
+  "type": "WAIT",
+  "sections": {
+    "status_message": {
+      "id": "status_message",
+      "templateId": "fcau-sample-wait--handover-instructions",
+      "title": "Sample Handover Instructions",
+      "projector": "MARKDOWN",
+      "visibleWhen": { "states": ["QUEUED_EXTERNALLY"] }
+    },
+    "reviewerform": {
+      "id": "reviewerform",
+      "templateId": "fcau-sample-wait--reviewer-form",
+      "title": "Consignment Sample Receipt Confirmation",
+      "projector": "FORM",
+      "dataKey": "reviewerform",
+      "visibleWhen": { "requireDataKey": "reviewerform" }
+    }
+  }
+}

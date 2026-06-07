@@ -1,0 +1,10 @@
+{
+  "id": "fcau-wait-sample--wait",
+  "task_type": "EXTERNAL_REVIEW",
+  "output_namespace": "sample_delivery",
+  "plugin_properties": {
+    "service_id": "fcau",
+    "path": "/api/oga/inject",
+    "task_code": "fcau_sample_wait_v1"
+  }
+}

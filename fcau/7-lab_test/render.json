@@ -1,0 +1,21 @@
+{
+  "id": "fcau-lab-test-flow:render",
+  "type": "LAB_TEST",
+  "sections": {
+    "status_message": {
+      "id": "status_message",
+      "templateId": "fcau-lab-test--reviewer-instructions",
+      "title": "Test Status",
+      "projector": "MARKDOWN",
+      "visibleWhen": { "states": ["QUEUED_EXTERNALLY"] }
+    },
+    "officerform": {
+      "id": "officerform",
+      "templateId": "fcau-lab-test--officer-form",
+      "title": "Submit Lab Test Outcome",
+      "projector": "FORM",
+      "dataKey": "lab",
+      "visibleWhen": { "requireDataKey": "lab" }
+    }
+  }
+}

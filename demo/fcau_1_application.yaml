@@ -1,0 +1,28 @@
+id: "fcau-apply-health-cert-flow"
+version: "1"
+initial: "applicant_submission"
+states:
+  - name: "applicant_submission"
+    executor: "interactive_task"
+    signals:
+      - "submit"
+    transitions:
+      - on: "submit"
+        to: "officer_review"
+
+  - name: "officer_review"
+    executor: "interactive_task"
+    signals:
+      - "approve"
+      - "reject"
+      - "needs_more_info"
+    transitions:
+      - on: "approve"
+        to: "end"
+      - on: "reject"
+        to: "end"
+      - on: "needs_more_info"
+        to: "applicant_submission"
+
+  - name: "end"
+    terminal: true

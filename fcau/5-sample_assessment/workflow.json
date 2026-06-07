@@ -1,0 +1,42 @@
+{
+  "id": "fcau-sample-assessment-flow",
+  "name": "Manual Sample Assessment",
+  "version": 1,
+  "nodes": [
+    {
+      "id": "start",
+      "type": "START"
+    },
+    {
+      "id": "assess_sample_task",
+      "type": "TASK",
+      "task_template_id": "fcau-sample-assessment--officer-review",
+      "input_mapping": {
+        "userform": "submission",
+        "reference_number": "submission.reference_number"
+      },
+      "output_mapping": {
+        "sample_number": "reviewerform.sample_number",
+        "manual_assessment_outcome": "reviewerform.manual_assessment_outcome",
+        "lab_test_required": "reviewerform.lab_test_required",
+        "assessment_outcome?": "reviewerform.assessment_outcome"
+      }
+    },
+    {
+      "id": "end",
+      "type": "END"
+    }
+  ],
+  "edges": [
+    {
+      "id": "e1",
+      "source_id": "start",
+      "target_id": "assess_sample_task"
+    },
+    {
+      "id": "e2",
+      "source_id": "assess_sample_task",
+      "target_id": "end"
+    }
+  ]
+}

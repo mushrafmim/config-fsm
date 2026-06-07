@@ -1,0 +1,56 @@
+@baseUrl = http://localhost:8080
+
+### Start a New Workflow Instance
+POST {{baseUrl}}/start
+Content-Type: application/json
+
+{
+  "id": "test-flow-1"
+}
+
+###
+
+### View Instance State
+GET {{baseUrl}}/instances/test-flow-1
+
+###
+
+### Submit Application (Signal: submit)
+POST {{baseUrl}}/instances/test-flow-1/signal/submit
+Content-Type: application/json
+
+{
+  "exporter_name": "Acme Corp",
+  "exporter_address": "123 Main St",
+  "description_of_food": "100 boxes of Apples"
+}
+
+###
+
+### Officer Review - Request More Info (Signal: needs_more_info)
+POST {{baseUrl}}/instances/test-flow-1/signal/needs_more_info
+Content-Type: application/json
+
+{
+  "comment": "Please provide your LC number."
+}
+
+###
+
+### Officer Review - Approve (Signal: approve)
+POST {{baseUrl}}/instances/test-flow-1/signal/approve
+Content-Type: application/json
+
+{
+  "reference_number": "CERT-12345"
+}
+
+###
+
+### Officer Review - Reject (Signal: reject)
+POST {{baseUrl}}/instances/test-flow-1/signal/reject
+Content-Type: application/json
+
+{
+  "rejection_reason": "Invalid exporter address"
+}

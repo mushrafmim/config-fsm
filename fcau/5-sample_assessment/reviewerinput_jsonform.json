@@ -1,0 +1,80 @@
+{
+  "id": "fcau-sample-assessment--reviewer-form",
+  "title": "Manual Sample Assessment",
+  "schema": {
+    "type": "object",
+    "properties": {
+      "sample_number": {
+        "type": "string",
+        "title": "Issued Lab Sample Tag ID",
+        "example": "SMP-FCAU-2026-948"
+      },
+      "manual_assessment_outcome": {
+        "type": "string",
+        "title": "Manual Physical Inspection Result",
+        "oneOf": [
+          {
+            "const": "satisfactory",
+            "title": "Satisfactory - No Visible Issues"
+          },
+          {
+            "const": "unsatisfactory",
+            "title": "Unsatisfactory - Visible Issues Detected"
+          }
+        ],
+        "example": "satisfactory"
+      },
+      "lab_test_required": {
+        "type": "string",
+        "title": "Is detailed chemical/microbiological Lab Analysis required?",
+        "oneOf": [
+          {
+            "const": "yes",
+            "title": "Yes"
+          },
+          {
+            "const": "no",
+            "title": "No"
+          }
+        ],
+        "example": "yes"
+      },
+      "assessment_outcome": {
+        "type": "string",
+        "title": "Manual Assessment Description & Comments",
+        "example": "Sample container arrived vacuum sealed and intact. Visual appearance and physical characteristics are standard. Chemical lab analysis is required due to dairy emulsifiers."
+      }
+    },
+    "required": [
+      "sample_number",
+      "manual_assessment_outcome",
+      "lab_test_required"
+    ]
+  },
+  "uiSchema": {
+    "type": "VerticalLayout",
+    "elements": [
+      {
+        "type": "Control",
+        "scope": "#/properties/sample_number"
+      },
+      {
+        "type": "HorizontalLayout",
+        "elements": [
+          {
+            "type": "Control",
+            "scope": "#/properties/manual_assessment_outcome"
+          },
+          {
+            "type": "Control",
+            "scope": "#/properties/lab_test_required"
+          }
+        ]
+      },
+      {
+        "type": "Control",
+        "scope": "#/properties/assessment_outcome"
+      }
+    ]
+  }
+}
