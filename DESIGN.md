@@ -31,9 +31,11 @@ type Event struct {
 type Result struct {
     Event   string    // emitted event name; selects a transition
     Suspend bool      // park the instance
-    WakeOn  []string  // signal names that resume it (when Suspend)
     WakeAt  *time.Time // optional deadline; fires "timeout" if reached
 }
+// Wake signals are NOT returned here — they are chart-owned (StateConfig.Signals).
+// The executor only decides whether to suspend; the engine reads the wake set
+// from the state.
 
 // Executor is the plugin contract. Stateless; registered by name.
 type Executor interface {
@@ -53,6 +55,7 @@ type StateConfig struct {
     Name        string
     Executor    string         // executor registry key
     Config      map[string]any // per-state executor config
+    Signals     []string       // wake signals (fixed vocabulary; each maps to a transition On)
     Transitions []Transition
     Terminal    bool
 }
@@ -116,7 +119,7 @@ func (e *Engine) Step(ctx context.Context, inst *Instance) error {
 
         if res.Suspend {
             inst.Status = StatusSuspended
-            inst.WakeOn, inst.WakeAt = res.WakeOn, res.WakeAt
+            inst.WakeOn, inst.WakeAt = state.Signals, res.WakeAt // wake signals are chart-owned
             return e.store.Save(ctx, inst)
         }
 

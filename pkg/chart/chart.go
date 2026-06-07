@@ -24,10 +24,18 @@ type Transition struct {
 }
 
 // StateConfig is one node of the FSM.
+//
+// Signals is the fixed vocabulary of external signal names that may wake this
+// state while it is suspended — it is chart-owned, not decided by the executor
+// at runtime. Each signal must correspond to an outgoing transition's On event
+// (the "lift the outcome to an event" pattern): the signal name doubles as the
+// transition selector when the instance resumes. The engine reads Signals to
+// populate the instance's wake set when an executor suspends.
 type StateConfig struct {
 	Name        string         `yaml:"name"`
 	Executor    string         `yaml:"executor,omitempty"`
 	Config      map[string]any `yaml:"config,omitempty"`
+	Signals     []string       `yaml:"signals,omitempty"`
 	Transitions []Transition   `yaml:"transitions,omitempty"`
 	Terminal    bool           `yaml:"terminal,omitempty"`
 }
@@ -76,17 +84,37 @@ func (c *Chart) Validate() error {
 			if len(s.Transitions) > 0 {
 				return fmt.Errorf("chart %q: terminal state %q must not declare transitions", c.ID, s.Name)
 			}
+			if len(s.Signals) > 0 {
+				return fmt.Errorf("chart %q: terminal state %q must not declare signals", c.ID, s.Name)
+			}
 			continue
 		}
 		if s.Executor == "" {
 			return fmt.Errorf("chart %q: non-terminal state %q must declare an executor", c.ID, s.Name)
 		}
+		events := make(map[string]bool, len(s.Transitions))
 		for _, t := range s.Transitions {
 			if t.On == "" {
 				return fmt.Errorf("chart %q: state %q has transition with empty 'on'", c.ID, s.Name)
 			}
 			if _, ok := c.index[t.To]; !ok {
 				return fmt.Errorf("chart %q: state %q transition on %q targets undefined %q", c.ID, s.Name, t.On, t.To)
+			}
+			events[t.On] = true
+		}
+		// Wake signals are chart-owned and must route somewhere: each must name
+		// an outgoing transition's event, so a resumed instance can branch on it.
+		seen := make(map[string]bool, len(s.Signals))
+		for _, sig := range s.Signals {
+			if sig == "" {
+				return fmt.Errorf("chart %q: state %q has an empty signal", c.ID, s.Name)
+			}
+			if seen[sig] {
+				return fmt.Errorf("chart %q: state %q declares duplicate signal %q", c.ID, s.Name, sig)
+			}
+			seen[sig] = true
+			if !events[sig] {
+				return fmt.Errorf("chart %q: state %q signal %q has no matching transition", c.ID, s.Name, sig)
 			}
 		}
 	}

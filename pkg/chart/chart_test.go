@@ -36,6 +36,33 @@ func TestParse_Valid(t *testing.T) {
 	}
 }
 
+func TestParse_SignalsParsedAndValidated(t *testing.T) {
+	const y = `
+id: c
+version: "1"
+initial: wait
+states:
+  - name: wait
+    executor: x
+    signals:
+      - approve
+      - reject
+    transitions:
+      - { on: approve, to: done }
+      - { on: reject,  to: done }
+  - name: done
+    terminal: true
+`
+	c, err := Parse([]byte(y))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	wait, _ := c.State("wait")
+	if len(wait.Signals) != 2 || wait.Signals[0] != "approve" || wait.Signals[1] != "reject" {
+		t.Fatalf("signals = %v, want [approve reject]", wait.Signals)
+	}
+}
+
 func TestParse_Errors(t *testing.T) {
 	cases := []struct {
 		name, yaml, want string
@@ -103,6 +130,51 @@ states:
   - name: a
     terminal: true`,
 			want: "duplicate state",
+		},
+		{
+			name: "signal without matching transition",
+			yaml: `id: c
+version: "1"
+initial: a
+states:
+  - name: a
+    executor: x
+    signals:
+      - approve
+    transitions:
+      - { on: ok, to: b }
+  - name: b
+    terminal: true`,
+			want: `signal "approve" has no matching transition`,
+		},
+		{
+			name: "duplicate signal",
+			yaml: `id: c
+version: "1"
+initial: a
+states:
+  - name: a
+    executor: x
+    signals:
+      - ok
+      - ok
+    transitions:
+      - { on: ok, to: b }
+  - name: b
+    terminal: true`,
+			want: `duplicate signal "ok"`,
+		},
+		{
+			name: "terminal with signals",
+			yaml: `id: c
+version: "1"
+initial: a
+states:
+  - name: a
+    terminal: true
+    signals:
+      - whatever`,
+			want: "must not declare signals",
 		},
 	}
 	for _, tc := range cases {
