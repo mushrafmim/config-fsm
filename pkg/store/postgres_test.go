@@ -39,15 +39,23 @@ func TestPostgres_SaveLoadClaim(t *testing.T) {
 		t.Fatal(err)
 	}
 	id := fmt.Sprintf("test-%d", time.Now().UnixNano())
-	t.Cleanup(func() { _, _ = p.db.ExecContext(ctx, "DELETE FROM instances WHERE id = $1", id) })
+	t.Cleanup(func() {
+		_, _ = p.db.ExecContext(ctx, "DELETE FROM executions WHERE instance_id = $1", id)
+		_, _ = p.db.ExecContext(ctx, "DELETE FROM instances WHERE id = $1", id)
+	})
 
 	inst := &Instance{
 		ID: id, ChartID: "c", ChartVersion: "1", Current: "wait",
 		Status: StatusSuspended, WakeOn: []string{"signal"},
 		Payload: map[string]any{"k": "v"},
 	}
-	if err := p.Save(ctx, inst); err != nil {
-		t.Fatalf("save: %v", err)
+	exec := &Execution{
+		ID:         id + "-e1",
+		InstanceID: id,
+		Trigger:    "start",
+	}
+	if err := p.StartInstance(ctx, inst, exec); err != nil {
+		t.Fatalf("start instance: %v", err)
 	}
 	if inst.Version != 1 {
 		t.Fatalf("version after first save = %d, want 1", inst.Version)
@@ -61,8 +69,19 @@ func TestPostgres_SaveLoadClaim(t *testing.T) {
 		t.Fatalf("roundtrip mismatch: %+v", got)
 	}
 
+	// Close starting execution as suspended
+	inst.Status = StatusSuspended
+	if err := p.CloseExecution(ctx, inst, id+"-e1", OutcomeSuspended, nil); err != nil {
+		t.Fatalf("close execution: %v", err)
+	}
+
 	// Claim moves suspended -> running and retains WakeOn.
-	claimed, err := p.Claim(ctx, id, "signal")
+	claimExec := &Execution{
+		ID:         id + "-e2",
+		InstanceID: id,
+		Trigger:    "signal:signal",
+	}
+	claimed, err := p.Claim(ctx, id, "signal", claimExec)
 	if err != nil {
 		t.Fatalf("claim: %v", err)
 	}
@@ -71,11 +90,21 @@ func TestPostgres_SaveLoadClaim(t *testing.T) {
 	}
 
 	// Second claim finds it no longer suspended.
-	if _, err := p.Claim(ctx, id, "signal"); err != ErrNotWaiting {
+	claimExec3 := &Execution{
+		ID:         id + "-e3",
+		InstanceID: id,
+		Trigger:    "signal:signal",
+	}
+	if _, err := p.Claim(ctx, id, "signal", claimExec3); err != ErrNotWaiting {
 		t.Fatalf("second claim err = %v, want ErrNotWaiting", err)
 	}
 	// Unknown id.
-	if _, err := p.Claim(ctx, "ghost", "signal"); err != ErrNotFound {
+	claimExecGhost := &Execution{
+		ID:         id + "-ghost-e",
+		InstanceID: "ghost",
+		Trigger:    "signal:signal",
+	}
+	if _, err := p.Claim(ctx, "ghost", "signal", claimExecGhost); err != ErrNotFound {
 		t.Fatalf("missing claim err = %v, want ErrNotFound", err)
 	}
 }
@@ -87,12 +116,23 @@ func TestPostgres_ClaimWrongSignal(t *testing.T) {
 		t.Fatal(err)
 	}
 	id := fmt.Sprintf("test-%d", time.Now().UnixNano())
-	t.Cleanup(func() { _, _ = p.db.ExecContext(ctx, "DELETE FROM instances WHERE id = $1", id) })
+	t.Cleanup(func() {
+		_, _ = p.db.ExecContext(ctx, "DELETE FROM executions WHERE instance_id = $1", id)
+		_, _ = p.db.ExecContext(ctx, "DELETE FROM instances WHERE id = $1", id)
+	})
 
-	if err := p.Save(ctx, &Instance{ID: id, ChartID: "c", ChartVersion: "1", Current: "wait", Status: StatusSuspended, WakeOn: []string{"approve"}}); err != nil {
-		t.Fatalf("save: %v", err)
+	inst := &Instance{ID: id, ChartID: "c", ChartVersion: "1", Current: "wait", Status: StatusSuspended, WakeOn: []string{"approve"}}
+	exec := &Execution{ID: id + "-e1", InstanceID: id, Trigger: "start"}
+	if err := p.StartInstance(ctx, inst, exec); err != nil {
+		t.Fatalf("start instance: %v", err)
 	}
-	if _, err := p.Claim(ctx, id, "reject"); err != ErrNotWaiting {
+	// Close starting execution as suspended
+	if err := p.CloseExecution(ctx, inst, id+"-e1", OutcomeSuspended, nil); err != nil {
+		t.Fatalf("close execution: %v", err)
+	}
+
+	claimExec := &Execution{ID: id + "-e2", InstanceID: id, Trigger: "signal:reject"}
+	if _, err := p.Claim(ctx, id, "reject", claimExec); err != ErrNotWaiting {
 		t.Fatalf("claim wrong signal err = %v, want ErrNotWaiting", err)
 	}
 }
@@ -106,15 +146,16 @@ func TestPostgres_FindDue(t *testing.T) {
 	due := fmt.Sprintf("due-%d", time.Now().UnixNano())
 	notDue := fmt.Sprintf("notdue-%d", time.Now().UnixNano())
 	t.Cleanup(func() {
+		_, _ = p.db.ExecContext(ctx, "DELETE FROM executions WHERE instance_id IN ($1, $2)", due, notDue)
 		_, _ = p.db.ExecContext(ctx, "DELETE FROM instances WHERE id IN ($1, $2)", due, notDue)
 	})
 
 	past := time.Now().Add(-time.Hour)
 	future := time.Now().Add(time.Hour)
-	if err := p.Save(ctx, &Instance{ID: due, ChartID: "c", ChartVersion: "1", Current: "w", Status: StatusSuspended, WakeAt: &past}); err != nil {
+	if err := p.StartInstance(ctx, &Instance{ID: due, ChartID: "c", ChartVersion: "1", Current: "w", Status: StatusSuspended, WakeAt: &past}, &Execution{ID: due + "-e1", InstanceID: due, Trigger: "start"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := p.Save(ctx, &Instance{ID: notDue, ChartID: "c", ChartVersion: "1", Current: "w", Status: StatusSuspended, WakeAt: &future}); err != nil {
+	if err := p.StartInstance(ctx, &Instance{ID: notDue, ChartID: "c", ChartVersion: "1", Current: "w", Status: StatusSuspended, WakeAt: &future}, &Execution{ID: notDue + "-e1", InstanceID: notDue, Trigger: "start"}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -128,6 +169,72 @@ func TestPostgres_FindDue(t *testing.T) {
 	}
 	if !contains(ids, due) || contains(ids, notDue) {
 		t.Fatalf("FindDue returned %v, want %q present and %q absent", ids, due, notDue)
+	}
+}
+
+func TestPostgres_Executions(t *testing.T) {
+	ctx := context.Background()
+	p := NewPostgres(openTestDB(t))
+	if err := p.EnsureSchema(ctx); err != nil {
+		t.Fatal(err)
+	}
+	id := fmt.Sprintf("test-%d", time.Now().UnixNano())
+	t.Cleanup(func() {
+		_, _ = p.db.ExecContext(ctx, "DELETE FROM executions WHERE instance_id = $1", id)
+		_, _ = p.db.ExecContext(ctx, "DELETE FROM instances WHERE id = $1", id)
+	})
+
+	sigDelivID := id + "-deliv"
+	inst := &Instance{ID: id, ChartID: "c", ChartVersion: "1", Current: "wait", Status: StatusSuspended, WakeOn: []string{"signal"}}
+	exec := &Execution{ID: id + "-e1", InstanceID: id, Trigger: "start", SignalDeliveryID: &sigDelivID}
+
+	if err := p.StartInstance(ctx, inst, exec); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+
+	// Attempt duplicate signal delivery ID - must fail unique constraint
+	inst2 := &Instance{ID: id + "-2", ChartID: "c", ChartVersion: "1", Current: "wait", Status: StatusSuspended, WakeOn: []string{"signal"}}
+	exec2 := &Execution{ID: id + "-e2", InstanceID: id + "-2", Trigger: "start", SignalDeliveryID: &sigDelivID}
+	if err := p.StartInstance(ctx, inst2, exec2); err == nil {
+		t.Fatal("expected error for duplicate signal delivery id")
+	}
+
+	// Update heartbeat
+	if err := p.Save(ctx, inst, id+"-e1"); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	// Retrieve crashed executions
+	crashed, err := p.FindCrashedExecutions(ctx, time.Now().Add(time.Hour), 0)
+	if err != nil {
+		t.Fatalf("find crashed: %v", err)
+	}
+
+	found := false
+	for _, cr := range crashed {
+		if cr.ID == id+"-e1" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected crashed execution to contain %s", id+"-e1")
+	}
+
+	// Close execution
+	if err := p.CloseExecution(ctx, inst, id+"-e1", OutcomeDone, nil); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	// Should no longer show as crashed
+	crashed, err = p.FindCrashedExecutions(ctx, time.Now().Add(time.Hour), 0)
+	if err != nil {
+		t.Fatalf("find crashed: %v", err)
+	}
+	for _, cr := range crashed {
+		if cr.ID == id+"-e1" {
+			t.Fatalf("execution %s should not be crashed after close", id+"-e1")
+		}
 	}
 }
 

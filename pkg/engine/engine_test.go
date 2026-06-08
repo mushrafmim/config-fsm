@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/mushrafmim/config-fsm/internal/testfixtures"
 	"github.com/mushrafmim/config-fsm/pkg/chart"
@@ -664,4 +665,134 @@ func nsField(inst *store.Instance, namespace, field string) any {
 		return nil
 	}
 	return ns[field]
+}
+
+func TestRecoverStale_RollbackToLastSuspend(t *testing.T) {
+	ctx := context.Background()
+	st := store.NewMemory()
+	reg := executor.NewRegistry()
+	_ = reg.Register(testfixtures.Parker{Named: "park"})
+
+	// 1. Start the instance with a standard lease. It parks at "wait" (suspended) and closes execution e1.
+	eng, c := engineFor(t, testfixtures.SuspendThenTerminate, reg, st)
+	inst, err := eng.Start(ctx, c, "i1", nil)
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if inst.Status != store.StatusSuspended {
+		t.Fatalf("expected suspended, got %v", inst.Status)
+	}
+
+	// 2. Claim the instance on "signal" to simulate active driving
+	claimExec := &store.Execution{
+		ID:         "e-crashed",
+		InstanceID: "i1",
+		Trigger:    "signal:signal",
+	}
+	_, err = st.Claim(ctx, "i1", "signal", claimExec)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 3. Create a new engine with negative lease duration so it treats any active execution as crashed
+	recoverEng := New(reg, st, WithLeaseDuration(-10*time.Second))
+	recovered, err := recoverEng.RecoverStale(ctx)
+	if err != nil {
+		t.Fatalf("RecoverStale: %v", err)
+	}
+	if recovered != 1 {
+		t.Fatalf("expected 1 recovered execution, got %d", recovered)
+	}
+
+	// 4. Verify that the instance has been rolled back to suspended state and the crashed execution closed
+	recoveredInst, err := st.Load(ctx, "i1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recoveredInst.Status != store.StatusSuspended || recoveredInst.Current != "wait" {
+		t.Fatalf("instance not rolled back correctly: status=%s state=%s", recoveredInst.Status, recoveredInst.Current)
+	}
+
+	closedExec, err := st.LoadExecution(ctx, "e-crashed")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if closedExec.Outcome == nil || *closedExec.Outcome != store.OutcomeCrashed {
+		t.Fatalf("expected crashed outcome, got %v", closedExec.Outcome)
+	}
+}
+
+func TestRecoverStale_NoCheckpoint(t *testing.T) {
+	ctx := context.Background()
+	st := store.NewMemory()
+	reg := executor.NewRegistry()
+	_ = reg.Register(testfixtures.Always{Named: "emit", Event: "success"})
+
+	// Start instance and simulate a crash during the initial Start (before first suspend checkpoint)
+	inst := &store.Instance{
+		ID:           "i2",
+		ChartID:      "linear",
+		ChartVersion: "1",
+		Current:      "start",
+		Status:       store.StatusRunning,
+	}
+	exec := &store.Execution{
+		ID:         "e-start-crashed",
+		InstanceID: "i2",
+		Trigger:    "start",
+	}
+	if err := st.StartInstance(ctx, inst, exec); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create recover engine with negative lease duration
+	recoverEng := New(reg, st, WithLeaseDuration(-10*time.Second))
+	recovered, err := recoverEng.RecoverStale(ctx)
+	if err != nil {
+		t.Fatalf("RecoverStale: %v", err)
+	}
+	if recovered != 1 {
+		t.Fatalf("expected 1 recovered execution, got %d", recovered)
+	}
+
+	// Instance must be marked failed
+	recoveredInst, err := st.Load(ctx, "i2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recoveredInst.Status != store.StatusFailed {
+		t.Fatalf("expected status failed, got %s", recoveredInst.Status)
+	}
+
+	closedExec, err := st.LoadExecution(ctx, "e-start-crashed")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if closedExec.Outcome == nil || *closedExec.Outcome != store.OutcomeCrashed {
+		t.Fatalf("expected crashed outcome, got %v", closedExec.Outcome)
+	}
+}
+
+func TestSignalInstance_Deduplication(t *testing.T) {
+	ctx := context.Background()
+	st := store.NewMemory()
+	reg := executor.NewRegistry()
+	_ = reg.Register(testfixtures.Parker{Named: "park"})
+
+	eng, c := engineFor(t, testfixtures.SuspendThenTerminate, reg, st)
+	if _, err := eng.Start(ctx, c, "i1", nil); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	// Signal with a unique delivery ID
+	_, err := eng.SignalInstance(ctx, "i1", "signal", nil, WithDeliveryID("msg-123"))
+	if err != nil {
+		t.Fatalf("SignalInstance: %v", err)
+	}
+
+	// Try again with the same delivery ID -> should fail / be rejected due to duplicate key
+	_, err = eng.SignalInstance(ctx, "i1", "signal", nil, WithDeliveryID("msg-123"))
+	if err == nil {
+		t.Fatal("expected duplicate signal to be rejected, got nil")
+	}
 }

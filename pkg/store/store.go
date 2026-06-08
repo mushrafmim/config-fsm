@@ -48,6 +48,31 @@ type Instance struct {
 	UpdatedAt     time.Time
 }
 
+// ExecutionOutcome enumerates the outcomes of an Execution.
+type ExecutionOutcome string
+
+const (
+	OutcomeSuspended ExecutionOutcome = "suspended"
+	OutcomeDone      ExecutionOutcome = "done"
+	OutcomeFailed    ExecutionOutcome = "failed"
+	OutcomeCrashed   ExecutionOutcome = "crashed"
+)
+
+// Execution tracks a single drive of an Instance.
+type Execution struct {
+	ID               string
+	InstanceID       string
+	Trigger          string            // "start", "signal:<name>", "recovery"
+	SignalDeliveryID *string           // nullable, for dedup
+	StartedAt        time.Time
+	FinishedAt       *time.Time        // nullable
+	Outcome          *ExecutionOutcome // nullable, "suspended" | "done" | "failed" | "crashed"
+	SuspendedAtState string            // state where the instance suspended
+	SuspendedWakeOn  []string          // signals it's waiting on
+	Error            string            // error message if outcome = failed
+	HeartbeatAt      time.Time         // liveness lease
+}
+
 // ErrNotFound is returned by Load when no instance with the given ID exists.
 var ErrNotFound = errors.New("instance not found")
 
@@ -58,28 +83,36 @@ var ErrNotWaiting = errors.New("instance not waiting on signal")
 
 // Store is the persistence contract.
 type Store interface {
-	Save(ctx context.Context, i *Instance) error
+	Save(ctx context.Context, i *Instance, activeExecutionID string) error
 	Load(ctx context.Context, id string) (*Instance, error)
 	// Claim atomically transitions a suspended instance waiting on signal to
-	// running and returns it, so only one caller can drive it. It must leave
-	// WakeOn intact (the caller releases the claim back to suspended on a
-	// rejected input). It returns ErrNotFound or ErrNotWaiting otherwise.
-	Claim(ctx context.Context, id, signal string) (*Instance, error)
+	// running and returns it, and creates an execution record.
+	Claim(ctx context.Context, id, signal string, exec *Execution) (*Instance, error)
 	FindDue(ctx context.Context, before time.Time, limit int) ([]*Instance, error)
+
+	StartInstance(ctx context.Context, i *Instance, exec *Execution) error
+	CloseExecution(ctx context.Context, i *Instance, execID string, outcome ExecutionOutcome, err error) error
+	FindCrashedExecutions(ctx context.Context, before time.Time, limit int) ([]*Execution, error)
+	LoadExecution(ctx context.Context, id string) (*Execution, error)
+	FindLastCheckpoint(ctx context.Context, instanceID string) (*Execution, error)
 }
 
 // Memory is an in-process Store. Clones on Save/Load so callers cannot mutate
 // stored state by accident.
 type Memory struct {
-	mu        sync.RWMutex
-	instances map[string]*Instance
+	mu         sync.RWMutex
+	instances  map[string]*Instance
+	executions map[string]*Execution
 }
 
 func NewMemory() *Memory {
-	return &Memory{instances: make(map[string]*Instance)}
+	return &Memory{
+		instances:  make(map[string]*Instance),
+		executions: make(map[string]*Execution),
+	}
 }
 
-func (m *Memory) Save(ctx context.Context, i *Instance) error {
+func (m *Memory) Save(ctx context.Context, i *Instance, activeExecutionID string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	now := time.Now()
@@ -89,6 +122,13 @@ func (m *Memory) Save(ctx context.Context, i *Instance) error {
 	i.UpdatedAt = now
 	i.Version++
 	m.instances[i.ID] = cloneInstance(i)
+
+	if activeExecutionID != "" {
+		if exec, ok := m.executions[activeExecutionID]; ok {
+			exec.HeartbeatAt = now
+			m.executions[activeExecutionID] = cloneExecution(exec)
+		}
+	}
 	return nil
 }
 
@@ -103,9 +143,8 @@ func (m *Memory) Load(ctx context.Context, id string) (*Instance, error) {
 }
 
 // Claim atomically moves a suspended instance to running under the lock,
-// serializing concurrent signal deliveries. WakeOn is retained so the caller
-// can release the claim on a rejected input.
-func (m *Memory) Claim(ctx context.Context, id, signal string) (*Instance, error) {
+// serializing concurrent signal deliveries, and creates an execution record.
+func (m *Memory) Claim(ctx context.Context, id, signal string, exec *Execution) (*Instance, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	inst, ok := m.instances[id]
@@ -115,9 +154,25 @@ func (m *Memory) Claim(ctx context.Context, id, signal string) (*Instance, error
 	if inst.Status != StatusSuspended || !slices.Contains(inst.WakeOn, signal) {
 		return nil, ErrNotWaiting
 	}
+	if _, ok := m.executions[exec.ID]; ok {
+		return nil, errors.New("execution already exists")
+	}
+	if exec.SignalDeliveryID != nil {
+		for _, e := range m.executions {
+			if e.SignalDeliveryID != nil && *e.SignalDeliveryID == *exec.SignalDeliveryID {
+				return nil, errors.New("duplicate signal delivery id")
+			}
+		}
+	}
+
 	inst.Status = StatusRunning
 	inst.Version++
 	inst.UpdatedAt = time.Now()
+	m.instances[id] = cloneInstance(inst)
+
+	exec.StartedAt = time.Now()
+	exec.HeartbeatAt = time.Now()
+	m.executions[exec.ID] = cloneExecution(exec)
 	return cloneInstance(inst), nil
 }
 
@@ -139,6 +194,111 @@ func (m *Memory) FindDue(ctx context.Context, before time.Time, limit int) ([]*I
 	return out, nil
 }
 
+func (m *Memory) StartInstance(ctx context.Context, i *Instance, exec *Execution) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if _, ok := m.instances[i.ID]; ok {
+		return errors.New("instance already exists")
+	}
+	if _, ok := m.executions[exec.ID]; ok {
+		return errors.New("execution already exists")
+	}
+	if exec.SignalDeliveryID != nil {
+		for _, e := range m.executions {
+			if e.SignalDeliveryID != nil && *e.SignalDeliveryID == *exec.SignalDeliveryID {
+				return errors.New("duplicate signal delivery id")
+			}
+		}
+	}
+
+	now := time.Now()
+	if i.CreatedAt.IsZero() {
+		i.CreatedAt = now
+	}
+	i.UpdatedAt = now
+	i.Version = 1
+	m.instances[i.ID] = cloneInstance(i)
+
+	exec.StartedAt = now
+	exec.HeartbeatAt = now
+	m.executions[exec.ID] = cloneExecution(exec)
+	return nil
+}
+
+func (m *Memory) CloseExecution(ctx context.Context, i *Instance, execID string, outcome ExecutionOutcome, err error) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	now := time.Now()
+	if i.CreatedAt.IsZero() {
+		i.CreatedAt = now
+	}
+	i.UpdatedAt = now
+	i.Version++
+	m.instances[i.ID] = cloneInstance(i)
+
+	if execID != "" {
+		exec, ok := m.executions[execID]
+		if ok {
+			exec.FinishedAt = &now
+			exec.Outcome = &outcome
+			if outcome == OutcomeSuspended {
+				exec.SuspendedAtState = i.Current
+				exec.SuspendedWakeOn = append([]string(nil), i.WakeOn...)
+			}
+			if err != nil {
+				exec.Error = err.Error()
+			}
+			exec.HeartbeatAt = now
+			m.executions[execID] = cloneExecution(exec)
+		}
+	}
+	return nil
+}
+
+func (m *Memory) FindCrashedExecutions(ctx context.Context, before time.Time, limit int) ([]*Execution, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	var out []*Execution
+	for _, exec := range m.executions {
+		if exec.Outcome == nil && exec.HeartbeatAt.Before(before) {
+			out = append(out, cloneExecution(exec))
+			if limit > 0 && len(out) >= limit {
+				break
+			}
+		}
+	}
+	return out, nil
+}
+
+func (m *Memory) LoadExecution(ctx context.Context, id string) (*Execution, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	exec, ok := m.executions[id]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	return cloneExecution(exec), nil
+}
+
+func (m *Memory) FindLastCheckpoint(ctx context.Context, instanceID string) (*Execution, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	var best *Execution
+	for _, exec := range m.executions {
+		if exec.InstanceID == instanceID && exec.Outcome != nil && *exec.Outcome == OutcomeSuspended {
+			if best == nil || exec.StartedAt.After(best.StartedAt) {
+				best = exec
+			}
+		}
+	}
+	if best == nil {
+		return nil, ErrNotFound
+	}
+	return cloneExecution(best), nil
+}
+
 func cloneInstance(in *Instance) *Instance {
 	cp := *in
 	if in.ChartDef != nil {
@@ -153,6 +313,26 @@ func cloneInstance(in *Instance) *Instance {
 	if in.WakeAt != nil {
 		t := *in.WakeAt
 		cp.WakeAt = &t
+	}
+	return &cp
+}
+
+func cloneExecution(in *Execution) *Execution {
+	cp := *in
+	if in.SignalDeliveryID != nil {
+		s := *in.SignalDeliveryID
+		cp.SignalDeliveryID = &s
+	}
+	if in.FinishedAt != nil {
+		t := *in.FinishedAt
+		cp.FinishedAt = &t
+	}
+	if in.Outcome != nil {
+		o := *in.Outcome
+		cp.Outcome = &o
+	}
+	if in.SuspendedWakeOn != nil {
+		cp.SuspendedWakeOn = append([]string(nil), in.SuspendedWakeOn...)
 	}
 	return &cp
 }
